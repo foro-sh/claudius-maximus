@@ -5,3 +5,15 @@ edition.workspace = true
 
 [dependencies]
 anyhow = "1"
+
+# Vendored libgit2/openssl so the worker ships as one static binary with no
+# system libgit2, no OpenSSL, and no `git` CLI to find at runtime
+# (foro-sh/claudius-maximus#1). SSH is off: every remote we touch is HTTPS.
+git2 = { version = "0.20", default-features = false, features = [
+    "https",
+    "vendored-libgit2",
+    "vendored-openssl",
+] }
+
+[dev-dependencies]
+tempfile = "3"
