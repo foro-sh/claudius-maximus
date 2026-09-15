@@ -40,11 +40,14 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # --locked everywhere below: Cargo.lock is committed for reproducible
+      # builds, so a PR that bumps a dependency without updating it should fail
+      # here rather than have CI quietly resolve a different tree than the box.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
