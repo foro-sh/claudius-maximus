@@ -1,8 +1,12 @@
-//! The trait `cm-worker` drives GitHub through. Kept separate from any real
-//! implementation so the worker's state machine can be built and tested
-//! against a fake before the octocrab/device-flow implementation lands
-//! (foro-sh/claudius-maximus#1).
+//! The trait `cm-worker` drives GitHub through, plus its `octocrab`
+//! implementation. Kept as a trait so the worker's state machine can also be
+//! tested against a fake (foro-sh/claudius-maximus#1).
 use async_trait::async_trait;
+
+mod client;
+mod token_store;
+
+pub use client::OctocrabGithubClient;
 
 /// One issue as the worker's state machine needs to see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,8 +21,7 @@ pub struct Issue {
 /// list issues carrying a label, read/add/remove labels, comment, and check
 /// the `blocked_by` dependency relationship. A real implementation
 /// authenticates via GitHub's OAuth device flow and stores the token with the
-/// `keyring` crate — see #1. No implementation lives in this crate; it only
-/// defines the contract.
+/// `keyring` crate — see #1, and [`OctocrabGithubClient`].
 #[async_trait]
 pub trait GithubClient: Send + Sync {
     async fn list_labeled_issues(&self, repo: &str, label: &str) -> anyhow::Result<Vec<Issue>>;
