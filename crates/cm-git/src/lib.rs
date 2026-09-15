@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use git2::build::CheckoutBuilder;
 use git2::{
     BranchType, Cred, Direction, FetchOptions, IndexAddOption, PushOptions, RemoteCallbacks,
     Repository, ResetType, Signature,
@@ -81,6 +82,16 @@ impl GitOps for Git2Ops {
             "sync_branch",
         )?;
         repo.set_head(&format!("refs/heads/{branch}"))?;
+        // The checkout is what clears untracked files, which a plain
+        // `reset --hard` leaves behind: the worker reuses one clone across
+        // issues, so whatever a killed Claude run dropped in the tree would
+        // otherwise be swept into the next issue's commit by `commit`'s
+        // `add_all`. Ignored files (`target/`) stay — that's the build cache.
+        // `reset` can't do it in one step; it overrides the checkout strategy
+        // it is handed.
+        let mut checkout = CheckoutBuilder::new();
+        checkout.force().remove_untracked(true);
+        repo.checkout_tree(upstream.as_object(), Some(&mut checkout))?;
         repo.reset(upstream.as_object(), ResetType::Hard, None)?;
         Ok(())
     }
@@ -256,6 +267,8 @@ mod tests {
         fs::write(clone.join("README.md"), "scribbled over\n").unwrap();
         fs::write(clone.join("junk.txt"), "tracked junk\n").unwrap();
         commit_all(&Repository::open(&clone).unwrap(), "chore: local work");
+        fs::create_dir_all(clone.join("leftovers")).unwrap();
+        fs::write(clone.join("leftovers/scratch.txt"), "never staged\n").unwrap();
 
         Git2Ops.sync_branch(&clone, "cm/issue-2").unwrap();
 
@@ -266,12 +279,15 @@ mod tests {
             "seed\n"
         );
         assert!(!clone.join("junk.txt").exists());
+        assert!(!clone.join("leftovers/scratch.txt").exists());
     }
 
     #[test]
     fn commit_stages_everything_and_returns_the_new_sha() {
         let (_tmp, clone) = fixture("main");
         fs::write(clone.join("new.txt"), "hello\n").unwrap();
+        fs::create_dir_all(clone.join("src/deep")).unwrap();
+        fs::write(clone.join("src/deep/mod.rs"), "// written by claude\n").unwrap();
         fs::remove_file(clone.join("README.md")).unwrap();
 
         let sha = Git2Ops
@@ -285,6 +301,7 @@ mod tests {
         assert_eq!(head.message(), Some("feat: add new file"));
         let tree = head.tree().unwrap();
         assert!(tree.get_name("new.txt").is_some());
+        assert!(tree.get_path(Path::new("src/deep/mod.rs")).is_ok());
         assert!(tree.get_name("README.md").is_none());
     }
 
