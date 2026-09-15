@@ -1,3 +1,13 @@
+## [0.4.0](https://github.com/foro-sh/claudius-maximus/compare/v0.3.0...v0.4.0) (2026-09-15)
+
+### Features
+
+* **github:** implement GithubClient on octocrab with device-flow auth ([13a8930](https://github.com/foro-sh/claudius-maximus/commit/13a893012b0a09f8acdece938befd500976a3e6c))
+
+### Bug Fixes
+
+* **github:** fail instead of re-authorizing a rejected stored token ([9a4e48d](https://github.com/foro-sh/claudius-maximus/commit/9a4e48dbd7a28620465bea1bd3f23a20b671ab2e))
+
 ## [0.3.0](https://github.com/foro-sh/claudius-maximus/compare/v0.2.0...v0.3.0) (2026-09-15)
 
 ### Features
