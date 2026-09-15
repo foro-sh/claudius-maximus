@@ -12,3 +12,5 @@ anyhow = "1"
 cm-github = { path = "../cm-github" }
 cm-git = { path = "../cm-git" }
 fslock = "0.2"
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
