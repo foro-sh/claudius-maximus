@@ -95,7 +95,7 @@ mod tests {
     fn claims_a_free_label_and_names_itself() {
         let dir = tmpdir();
         let claim = claim_label(&dir, "free-label", "Claudius Maximus");
-        assert!(matches!(claim, Ok(_)));
+        assert!(claim.is_ok());
         let named = std::fs::read_to_string(claim_path(&dir, "free-label")).unwrap();
         assert!(named.starts_with("Claudius Maximus (pid "), "{named}");
     }

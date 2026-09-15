@@ -24,3 +24,30 @@ pub fn run(repo_dir: &Path, model: &str, effort: &str, prompt: &str) -> anyhow::
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
+
+/// The seam the state machine calls Claude through, so its tests can drive a
+/// fake instead of spending quota (`fakes::FakeClaude`).
+pub trait Claude: Send + Sync {
+    fn run(
+        &self,
+        repo_dir: &Path,
+        model: &str,
+        effort: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String>;
+}
+
+/// The real thing: `claude -p` on `$PATH`.
+pub struct ClaudeCli;
+
+impl Claude for ClaudeCli {
+    fn run(
+        &self,
+        repo_dir: &Path,
+        model: &str,
+        effort: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        run(repo_dir, model, effort, prompt)
+    }
+}
