@@ -70,7 +70,20 @@ impl Worker<'_> {
         // plans against code that moved on. Only the default branch is synced
         // here: `claude/issue-N` may carry an open PR's commits, and hard-
         // resetting that onto main would throw them away.
-        self.git.sync_branch(&repo.clone_path, "main")?;
+        //
+        // A failed sync (a network blip, origin down) must not stall the
+        // repo's whole backlog: the implement step syncs main itself from the
+        // prompt, and planning against a slightly stale clone is what
+        // `worker.sh` did on every sweep anyway.
+        //
+        // ponytail: the branch name is hardcoded — every repo the worker
+        // serves is on `main`. Read it off origin's HEAD if that ever changes.
+        if let Err(err) = self.git.sync_branch(&repo.clone_path, "main") {
+            self.log(&format!(
+                "{}: sync failed, planning against the clone as-is: {err:#}",
+                repo.repo
+            ));
+        }
 
         let issues = self
             .github
@@ -587,6 +600,54 @@ mod tests {
             harness.github.labels("foro-sh/foro", 7),
             vec![LABEL.to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_sync_does_not_stall_the_repos_backlog() {
+        struct FailingGit;
+        impl GitOps for FailingGit {
+            fn sync_branch(&self, _: &std::path::Path, _: &str) -> anyhow::Result<()> {
+                anyhow::bail!("origin unreachable")
+            }
+            fn commit(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<Option<String>> {
+                unreachable!("the worker leaves commits to Claude")
+            }
+            fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
+                unreachable!("the worker leaves pushes to Claude")
+            }
+        }
+
+        let config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        let github = FakeGithub::new(vec![FakeIssue::new(
+            "foro-sh/foro",
+            7,
+            "danielsteman",
+            &[LABEL],
+        )]);
+        let claude = FakeClaude::default();
+        let notifier = Notifier::new(None, config.instance.clone());
+
+        Worker {
+            config: &config,
+            github: &github,
+            git: &FailingGit,
+            claude: &claude,
+            notifier: &notifier,
+        }
+        .sweep()
+        .await;
+
+        assert_eq!(github.comments().len(), 1, "the issue is still planned");
     }
 
     #[tokio::test]
