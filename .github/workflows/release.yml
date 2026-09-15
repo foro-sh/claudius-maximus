@@ -1,0 +1,60 @@
+name: Release
+
+# Runs on every push to main. Own concurrency group (not keyed on github.ref)
+# so a release run is never cancelled mid-push — a half-pushed tag/changelog
+# commit is the worst outcome.
+#
+# Commitlint is a blocking first step: a non-conventional pushed commit fails
+# the job before semantic-release runs.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create tags/releases and push the changelog commit
+  issues: write # comment on released issues
+  pull-requests: write # comment on released PRs
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so commit analysis sees every commit
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Lint pushed commits
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: |
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            # New branch / no prior ref — lint just the latest commit.
+            pnpm exec commitlint --from "HEAD~1" --to "HEAD" --verbose
+          else
+            pnpm exec commitlint --from "$BEFORE" --to "$AFTER" --verbose
+          fi
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm release
