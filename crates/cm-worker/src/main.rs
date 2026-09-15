@@ -36,11 +36,11 @@ async fn main() -> anyhow::Result<()> {
         Err(ClaimError::Fatal(err)) => return Err(err),
     };
 
-    // TODO: swap for OctocrabGithubClient / Git2Ops once merged
-    // (foro-sh/claudius-maximus#1). The fakes keep the binary runnable and the
-    // state machine honest until then; only these three lines change.
+    // TODO: swap for OctocrabGithubClient once merged (#4) — the fake keeps the
+    // binary runnable until then, and the state machine already talks to the
+    // trait, so it is this one line that changes.
     let github = fakes::FakeGithub::default();
-    let git = fakes::FakeGit::default();
+    let git = cm_git::Git2Ops;
     let claude = claude_cli::ClaudeCli;
 
     Worker {
