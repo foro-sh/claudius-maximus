@@ -1,0 +1,50 @@
+name: CI
+
+# The build/test gate for pull requests. Release (`release.yml`) runs on pushes
+# to main and only cuts versions — it never compiles the workspace, so without
+# this nothing checks that a PR builds.
+#
+# Concurrency is keyed on the ref and *does* cancel, the opposite of the
+# release job: an outdated run tells you about a commit that no longer exists
+# on the branch, so the newest push wins.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # cm-git builds libgit2 and OpenSSL from source (vendored, so the worker
+      # ships as one static binary) — minutes per run without a cache.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
