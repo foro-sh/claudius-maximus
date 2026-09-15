@@ -24,6 +24,8 @@ pub struct Issue {
 /// `keyring` crate — see #1, and [`OctocrabGithubClient`].
 #[async_trait]
 pub trait GithubClient: Send + Sync {
+    /// Open issues carrying `label`, pull requests excluded. A closed issue
+    /// is finished work no matter what labels it still has on it.
     async fn list_labeled_issues(&self, repo: &str, label: &str) -> anyhow::Result<Vec<Issue>>;
     async fn issue_labels(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>>;
     async fn add_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;

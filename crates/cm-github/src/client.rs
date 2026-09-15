@@ -11,7 +11,8 @@ use std::time::Duration;
 use crate::token_store::{KeyringStore, SERVICE, TokenStore};
 use crate::{GithubClient, Issue};
 
-/// Where the API lives. Device flow talks to the website, not the API host.
+/// The REST API host, and — separately — the website, which is where the
+/// device flow endpoints live.
 const GITHUB_API: &str = "https://api.github.com";
 const GITHUB_WEB: &str = "https://github.com";
 
