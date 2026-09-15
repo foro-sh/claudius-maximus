@@ -6,8 +6,9 @@ use http::header::ACCEPT;
 use octocrab::Octocrab;
 use octocrab::params::State;
 use secrecy::{ExposeSecret, SecretString};
+use std::time::Duration;
 
-use crate::token_store::{KeyringStore, TokenStore};
+use crate::token_store::{KeyringStore, SERVICE, TokenStore};
 use crate::{GithubClient, Issue};
 
 /// Where the API lives. Device flow talks to the website, not the API host.
@@ -30,10 +31,14 @@ impl OctocrabGithubClient {
     /// `client_id` is the id of a GitHub OAuth App with device flow enabled —
     /// a deployment detail, so it is passed in rather than baked in here.
     ///
-    /// The device flow blocks: it prints a verification URL and a user code,
-    /// then polls GitHub until the operator authorizes. That is the same
-    /// one-time ceremony `gh auth login` asks for, and it only happens when
-    /// the keychain holds no usable token.
+    /// With no token stored this blocks on the device flow: it prints a
+    /// verification URL and a user code, then polls until the operator
+    /// authorizes — the same one-time ceremony `gh auth login` asks for.
+    ///
+    /// A *stored* token GitHub refuses is an error instead. Silently falling
+    /// back to the device flow would park an unattended worker on a prompt
+    /// nobody is there to answer; the operator has to re-authorize either
+    /// way, so say so and exit.
     pub async fn login_or_load(instance_name: &str, client_id: &str) -> anyhow::Result<Self> {
         Self::login_or_load_with(
             instance_name,
@@ -52,13 +57,15 @@ impl OctocrabGithubClient {
         api_uri: &str,
         web_uri: &str,
     ) -> anyhow::Result<Self> {
-        if let Some(token) = store.load(instance_name)?
-            && let Some(client) = Self::authenticated(api_uri, token).await?
-        {
-            return Ok(client);
+        if let Some(token) = store.load(instance_name)? {
+            return Self::authenticated(api_uri, token).await?.with_context(|| {
+                format!(
+                    "GitHub rejected the token stored for {instance_name:?} — revoked, expired, \
+                     or issued against another OAuth app. Delete the {SERVICE}/{instance_name} \
+                     entry from the keychain and restart to authorize again."
+                )
+            });
         }
-        // Falling through means there was no token, or the stored one is
-        // revoked, expired, or issued against another OAuth app.
 
         let token = device_flow(client_id, web_uri).await?;
         store.store(instance_name, &token)?;
@@ -68,8 +75,9 @@ impl OctocrabGithubClient {
     }
 
     /// Build a client on `token` and confirm GitHub still accepts it.
-    /// `Ok(None)` means the token is unauthorized; an outer `Err` means the
-    /// check itself failed, which is not a reason to re-run the device flow.
+    /// `Ok(None)` is specifically a 401 — the token is no good. Every other
+    /// failure stays an `Err`, so a flaky API never gets reported as a
+    /// rejected token.
     async fn authenticated(api_uri: &str, token: String) -> anyhow::Result<Option<Self>> {
         let crab = Octocrab::builder()
             .base_uri(api_uri)
@@ -227,10 +235,22 @@ async fn device_flow(client_id: &str, web_uri: &str) -> anyhow::Result<String> {
         codes.verification_uri, codes.user_code
     );
 
-    let auth = codes
-        .poll_until_available(&login, &client_id)
-        .await
-        .context("waiting for device flow authorization")?;
+    // `poll_until_available` polls forever. GitHub stops honoring the code
+    // after `expires_in`, so past that there is nothing left to wait for —
+    // bound it rather than spin until someone notices.
+    let auth = tokio::time::timeout(
+        Duration::from_secs(codes.expires_in),
+        codes.poll_until_available(&login, &client_id),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "device code {} expired after {}s without being authorized",
+            codes.user_code,
+            codes.expires_in
+        )
+    })?
+    .context("waiting for device flow authorization")?;
 
     Ok(auth.access_token.expose_secret().to_owned())
 }
@@ -388,27 +408,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn re_runs_the_device_flow_when_the_stored_token_is_rejected() {
+    async fn a_rejected_stored_token_is_an_error_not_a_new_device_flow() {
+        // The device-flow mocks are mounted, so entering the flow would make
+        // this succeed — the assertion is that it does not.
         let server = MockServer::start().await;
         mock_device_flow(&server).await;
         Mock::given(method("GET"))
             .and(path("/user"))
-            .and(header("authorization", "Bearer stored-token"))
             .respond_with(ResponseTemplate::new(401).set_body_json(json!({
                 "message": "Bad credentials",
                 "documentation_url": "https://docs.github.com/rest",
             })))
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/user"))
-            .and(header("authorization", "Bearer fresh-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(author("claudius")))
-            .mount(&server)
-            .await;
 
         let store = MemoryStore::with_token(INSTANCE, "stored-token");
-        let client = OctocrabGithubClient::login_or_load_with(
+        let error = OctocrabGithubClient::login_or_load_with(
             INSTANCE,
             CLIENT_ID,
             &store,
@@ -416,14 +431,65 @@ mod tests {
             &server.uri(),
         )
         .await
-        .unwrap();
+        .map(|_| ())
+        .unwrap_err();
 
-        assert_eq!(client.token(), "fresh-token");
-        assert_eq!(store.get(INSTANCE).as_deref(), Some("fresh-token"));
+        assert!(
+            error
+                .to_string()
+                .contains("GitHub rejected the token stored"),
+            "unexpected error: {error:#}"
+        );
+        // The bad token is left in place; clearing it is the operator's call.
+        assert_eq!(store.get(INSTANCE).as_deref(), Some("stored-token"));
     }
 
     #[tokio::test]
-    async fn a_failing_token_check_does_not_trigger_a_device_flow() {
+    async fn an_unauthorized_device_code_gives_up_when_it_expires() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/login/device/code"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "device_code": "dev-code",
+                "user_code": "ABCD-1234",
+                "verification_uri": "https://github.com/login/device",
+                // Already expired, so the bound trips on the first poll
+                // instead of making the test wait out a real 15 minutes.
+                "expires_in": 0,
+                "interval": 1,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/login/oauth/access_token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "error": "authorization_pending" })),
+            )
+            .mount(&server)
+            .await;
+
+        let store = MemoryStore::default();
+        let error = OctocrabGithubClient::login_or_load_with(
+            INSTANCE,
+            CLIENT_ID,
+            &store,
+            &server.uri(),
+            &server.uri(),
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("expired after 0s"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(store.get(INSTANCE), None);
+    }
+
+    #[tokio::test]
+    async fn a_failing_token_check_is_not_reported_as_a_rejected_token() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/user"))
