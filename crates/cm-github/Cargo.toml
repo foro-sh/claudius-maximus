@@ -1,0 +1,8 @@
+[package]
+name = "cm-github"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
