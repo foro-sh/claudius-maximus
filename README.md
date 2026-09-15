@@ -106,9 +106,12 @@ once as the account this instance acts as, and the token is stored in the OS
 keyring (Secret Service on Linux) — not in `/etc/claudius-<user>.env`. Same
 one-time ceremony `gh auth login` used to be, with no `gh` CLI on the box at all.
 Run it in the foreground once before enabling the unit, so you can complete the
-flow:
+flow. It validates its config before anything else, so write
+[`/etc/claudius-claudebot.env`](#config) first and source it for this one run —
+systemd reads it for you afterwards:
 
 ```bash
+set -a; . /etc/claudius-claudebot.env; set +a
 /home/claudebot/claudius-maximus/claudius-maximus     # prints code + URL
 ```
 
@@ -244,6 +247,7 @@ sudo -u claudebot2 -H bash -l
   mkdir -p /home/claudebot2/claudius-maximus
   # ...scp the binary here, then:
   chmod +x /home/claudebot2/claudius-maximus/claudius-maximus
+  set -a; . /etc/claudius-claudebot2.env; set +a       # written below, first
   /home/claudebot2/claudius-maximus/claudius-maximus    # prints code + URL
   exit
 chown -R claudebot2:claudebot2 /home/claudebot2/claudius-maximus
