@@ -32,9 +32,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let repos_raw = std::env::var("REPOS").map_err(|_| {
-            anyhow::anyhow!(
-                "set REPOS=owner/name=/path/to/clone[,owner/name2=/path/to/clone2]"
-            )
+            anyhow::anyhow!("set REPOS=owner/name=/path/to/clone[,owner/name2=/path/to/clone2]")
         })?;
         let repos = parse_repos(&repos_raw)?;
 
@@ -123,13 +121,15 @@ mod tests {
 
     #[test]
     fn parses_multiple_repos_with_an_author_allowlist() {
-        let repos = parse_repos(
-            "foro-sh/platform=/repos/platform,foro-sh/foro=/repos/foro=alice|bob",
-        )
-        .unwrap();
+        let repos =
+            parse_repos("foro-sh/platform=/repos/platform,foro-sh/foro=/repos/foro=alice|bob")
+                .unwrap();
         assert_eq!(repos.len(), 2);
         assert_eq!(repos[1].repo, "foro-sh/foro");
-        assert_eq!(repos[1].authors, vec!["alice".to_string(), "bob".to_string()]);
+        assert_eq!(
+            repos[1].authors,
+            vec!["alice".to_string(), "bob".to_string()]
+        );
     }
 
     #[test]
