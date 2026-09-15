@@ -9,8 +9,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-cm-github = { path = "../cm-github" }
+async-trait = "0.1"
 cm-git = { path = "../cm-git" }
+cm-github = { path = "../cm-github" }
 fslock = "0.2"
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 ureq = { version = "2", features = ["json"] }

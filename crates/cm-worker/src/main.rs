@@ -1,17 +1,17 @@
 mod claim;
 mod claude_cli;
 mod config;
+mod fakes;
 mod notify;
+mod worker;
 
 use claim::ClaimError;
 use config::Config;
 use notify::Notifier;
+use worker::Worker;
 
-// Scaffold only. The state machine (plan -> implement -> done), the poll loop
-// and Mattermost notify all still need to land here against
-// `cm_github::GithubClient` and `cm_git::GitOps` — see
-// foro-sh/claudius-maximus#1.
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let notifier = Notifier::new(
         config.mattermost_webhook_url.clone(),
@@ -36,6 +36,20 @@ fn main() -> anyhow::Result<()> {
         Err(ClaimError::Fatal(err)) => return Err(err),
     };
 
-    println!("{config:#?}");
-    Ok(())
+    // TODO: swap for OctocrabGithubClient / Git2Ops once merged
+    // (foro-sh/claudius-maximus#1). The fakes keep the binary runnable and the
+    // state machine honest until then; only these three lines change.
+    let github = fakes::FakeGithub::default();
+    let git = fakes::FakeGit::default();
+    let claude = claude_cli::ClaudeCli;
+
+    Worker {
+        config: &config,
+        github: &github,
+        git: &git,
+        claude: &claude,
+        notifier: &notifier,
+    }
+    .run()
+    .await
 }
