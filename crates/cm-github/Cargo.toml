@@ -6,8 +6,8 @@ edition.workspace = true
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-keyring = "4"
 http = "1"
+keyring = "4"
 octocrab = "0.54"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
