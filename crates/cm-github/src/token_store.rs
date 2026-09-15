@@ -8,7 +8,7 @@
 use anyhow::Context;
 
 /// Keychain service name every instance's entry is filed under.
-const SERVICE: &str = "claudius-maximus";
+pub(crate) const SERVICE: &str = "claudius-maximus";
 
 pub(crate) trait TokenStore: Send + Sync {
     /// The stored token for `instance_name`, or `None` if there isn't one yet.
