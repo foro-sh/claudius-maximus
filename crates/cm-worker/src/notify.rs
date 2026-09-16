@@ -37,8 +37,13 @@ impl Notifier {
     /// [`Notifier::forget`] is what re-arms a key, so each failure is said once
     /// per run of bad luck rather than once ever.
     pub fn post_once(&self, key: &str, text: &str) {
-        if self.said.lock().unwrap().insert(key.to_owned()) {
-            self.post(text);
+        if self.said.lock().unwrap().contains(key) {
+            return;
+        }
+        // Remembered only once it was actually delivered: a webhook that was
+        // down for this one POST must not silence the line for good.
+        if self.deliver(text) {
+            self.said.lock().unwrap().insert(key.to_owned());
         }
     }
 
@@ -51,24 +56,34 @@ impl Notifier {
     /// Posts to Mattermost if configured. Never fails the worker on a bad
     /// post — a dead webhook must not stop the backlog from draining.
     pub fn post(&self, text: &str) {
+        self.deliver(text);
+    }
+
+    /// Posts, reporting whether Mattermost took it. `false` also covers "there
+    /// is no webhook configured", which is nothing to remember either.
+    fn deliver(&self, text: &str) -> bool {
         let Some(url) = &self.webhook_url else {
-            return;
+            return false;
         };
         let body = serde_json::json!({
             "username": self.instance,
             "icon_emoji": ":crown:",
             "text": text,
         });
-        if let Err(err) = ureq::AgentBuilder::new()
+        match ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(10))
             .build()
             .post(url)
             .send_json(body)
         {
-            println!(
-                "{}: mattermost notify failed (ignored): {err}",
-                self.instance
-            );
+            Ok(_) => true,
+            Err(err) => {
+                println!(
+                    "{}: mattermost notify failed (ignored): {err}",
+                    self.instance
+                );
+                false
+            }
         }
     }
 }

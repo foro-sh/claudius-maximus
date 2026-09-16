@@ -66,6 +66,17 @@ impl Worker<'_> {
         for repo in &self.config.repos {
             if let Err(err) = self.sweep_repo(repo).await {
                 self.log(&format!("{}: sweep error (continuing): {err:#}", repo.repo));
+                self.notifier.post_once(
+                    // A repo whose issues cannot be listed, or whose clone
+                    // cannot be synced, fails for every issue in it at once —
+                    // one piece of news, and one a success in that repo
+                    // genuinely clears.
+                    &repo_failure_key(&repo.repo),
+                    &format!(
+                        ":warning: {} could not be swept — will retry — https://github.com/{}",
+                        repo.repo, repo.repo
+                    ),
+                );
             }
         }
     }
@@ -85,6 +96,14 @@ impl Worker<'_> {
                 ));
                 continue;
             }
+            // A clone that cannot be synced is a tree of unknown shape — it
+            // may still be sitting on the last issue's branch — and the next
+            // issue in this repo would fail the same way. Abandon the repo for
+            // this sweep rather than spending a connect timeout per issue.
+            self.git
+                .sync_branch(&repo.clone_path, "main", self.token)
+                .with_context(|| format!("syncing {}", repo.repo))?;
+
             if let Err(err) = self.process_issue(repo, &issue).await {
                 // Everything that fails inside `implement_issue` is reported
                 // there; what reaches here is a failure to plan, or to read
@@ -95,10 +114,7 @@ impl Worker<'_> {
                     repo.repo, issue.number
                 ));
                 self.notifier.post_once(
-                    // Keyed on the repo alone: a rate limit, an unreachable
-                    // origin or a revoked token fails every issue in the
-                    // backlog at once, and that is one piece of news.
-                    &sweep_failure_key(&repo.repo),
+                    &issue_failure_key(&repo.repo, issue.number),
                     &format!(
                         ":warning: {}#{} could not be processed — will retry — {}",
                         repo.repo,
@@ -131,22 +147,6 @@ impl Worker<'_> {
             ));
             return Ok(());
         }
-        // Before every Claude run, not once per repo: one clone serves the
-        // whole backlog, and an implementing run leaves HEAD on its own
-        // `claude/issue-N` with its commits and its leftovers. The next issue
-        // would branch off that one and open a PR carrying someone else's
-        // work. Only main is synced — `claude/issue-N` may carry an open PR's
-        // commits, and hard-resetting that onto main would throw them away.
-        //
-        // A sync that fails skips this issue rather than running against a
-        // tree of unknown shape. The next sweep retries it.
-        //
-        // ponytail: the branch name is hardcoded — every repo the worker
-        // serves is on `main`. Read it off origin's HEAD if that ever changes.
-        self.git
-            .sync_branch(&repo.clone_path, "main", self.token)
-            .with_context(|| format!("syncing {} before touching #{number}", repo.repo))?;
-
         if labels.iter().any(|l| *l == self.planned_label()) {
             self.implement_issue(repo, issue).await
         } else {
@@ -197,7 +197,8 @@ or run git — output the plan text only.
             .await?;
         // The repo is evidently reachable and this issue plannable, so an
         // earlier sweep failure on it is no longer the current state.
-        self.notifier.forget(&sweep_failure_key(&repo.repo));
+        self.notifier.forget(&issue_failure_key(&repo.repo, number));
+        self.notifier.forget(&repo_failure_key(&repo.repo));
         self.notifier.post(&format!(
             ":scroll: planned {}#{number} — implementing next sweep — {}",
             repo.repo,
@@ -248,9 +249,8 @@ or run git — output the plan text only.
                 // Whatever went wrong here before is history now, so the next
                 // failure is news again rather than old news — for this issue,
                 // and for the repo, which is evidently reachable.
-                self.notifier
-                    .forget(&implement_failure_key(&repo.repo, number));
-                self.notifier.forget(&sweep_failure_key(&repo.repo));
+                self.notifier.forget(&issue_failure_key(&repo.repo, number));
+                self.notifier.forget(&repo_failure_key(&repo.repo));
                 self.notifier.post(&format!(
                     ":white_check_mark: shipped {}#{number} — {url}",
                     repo.repo
@@ -266,7 +266,7 @@ or run git — output the plan text only.
                     // error is usually a whole `claude` stderr, which differs
                     // every run. `forget` below is what makes it sayable
                     // again.
-                    &implement_failure_key(&repo.repo, number),
+                    &issue_failure_key(&repo.repo, number),
                     &format!(
                         ":warning: {}#{number} implement failed — will retry — {}",
                         repo.repo,
@@ -362,29 +362,30 @@ worker's job, and the box has no credentials for you to do it with.
         Ok(comments
             .iter()
             .rev()
-            .find(|c| {
-                c.author.eq_ignore_ascii_case(mine) && c.body.lines().any(is_plan_bookkeeping)
-            })
-            .map(|c| {
-                let stripped = c
-                    .body
-                    .lines()
-                    .filter(|line| !is_plan_bookkeeping(line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                stripped
-                    .trim_end()
-                    // Only the separator the footer was written under, not a
-                    // horizontal rule the plan itself ends on.
-                    .strip_suffix("---")
-                    .unwrap_or(&stripped)
-                    .trim()
-                    .to_owned()
-            })
+            .find(|c| c.author.eq_ignore_ascii_case(mine) && self.is_our_plan(&c.body))
+            .map(|c| strip_plan_bookkeeping(&c.body))
             // An edit that leaves nothing but the footer is no more a plan
             // than a deleted comment is, and `plan_issue` refuses to post an
             // empty one in the first place. Same treatment: plan it again.
             .filter(|plan| !plan.is_empty()))
+    }
+
+    /// True if this comment is a plan for *this* instance's queue.
+    ///
+    /// The marker names the label, so two instances sharing one GitHub account
+    /// never pick up each other's plans. A comment carrying no marker at all is
+    /// ours by its footer — that is a plan an operator rewrote in GitHub's
+    /// editor, where the marker is visible and easy to drop.
+    fn is_our_plan(&self, comment: &str) -> bool {
+        let marker = self.plan_marker();
+        let mut lines = comment.lines().map(str::trim);
+        if lines.clone().any(|line| line == marker) {
+            return true;
+        }
+        !lines.any(|line| line.starts_with(MARKER_PREFIX))
+            && comment
+                .lines()
+                .any(|line| line.trim().starts_with(":crown: Plan by "))
     }
 
     /// Ends every plan comment, so the implementing sweep can find the plan
@@ -423,23 +424,45 @@ worker's job, and the box has no credentials for you to do it with.
     }
 }
 
-/// Names the repo as a whole for [`Notifier::post_once`]: anything that fails
-/// before an issue is reached fails for every issue in that repo.
-fn sweep_failure_key(repo: &str) -> String {
-    format!("sweep {repo}")
+/// Names the repo as a whole for [`Notifier::post_once`]: listing its issues
+/// and syncing its clone fail for every issue in it at once.
+fn repo_failure_key(repo: &str) -> String {
+    format!("repo {repo}")
 }
 
-/// Names one issue's implementation for [`Notifier::post_once`].
-fn implement_failure_key(repo: &str, number: u64) -> String {
-    format!("implement {repo}#{number}")
+/// Names one issue for [`Notifier::post_once`]. One key per issue, whatever
+/// stage it failed at: what an operator needs to hear is that this issue is
+/// stuck, and hearing it once per stuck issue is the whole point.
+fn issue_failure_key(repo: &str, number: u64) -> String {
+    format!("issue {repo}#{number}")
 }
 
-/// The lines the worker writes onto its own plan comment to find it again.
-/// Stripped on the way back out: they are bookkeeping, not plan.
+/// True for the lines the worker writes onto its own plan comment to find it
+/// again. Stripped on the way back out: they are bookkeeping, not plan.
 fn is_plan_bookkeeping(line: &str) -> bool {
     let line = line.trim();
-    line.starts_with("<!-- cm:plan:") || line.starts_with(":crown: Plan by ")
+    line.starts_with(MARKER_PREFIX) || line.starts_with(":crown: Plan by ")
 }
+
+/// A plan comment's bookkeeping lines, and the separator they were written
+/// under, taken back out. Trailing blank lines and rules go with them; a `---`
+/// inside the plan, or three hyphens ending a line of prose, stay.
+fn strip_plan_bookkeeping(comment: &str) -> String {
+    let mut lines: Vec<&str> = comment
+        .lines()
+        .filter(|line| !is_plan_bookkeeping(line))
+        .collect();
+    while lines
+        .last()
+        .is_some_and(|line| line.trim().is_empty() || line.trim() == "---")
+    {
+        lines.pop();
+    }
+    lines.join("\n").trim().to_owned()
+}
+
+/// Opens the HTML marker the worker hides in every plan comment.
+const MARKER_PREFIX: &str = "<!-- cm:plan:";
 
 /// The issue as Claude gets to see it: the worker reads GitHub, the box it
 /// runs Claude on cannot. Fenced so a body full of markdown headings cannot be
@@ -772,6 +795,68 @@ mod tests {
             1,
             "the next sweep plans it again"
         );
+    }
+
+    #[tokio::test]
+    async fn another_queues_plan_is_never_picked_up() {
+        // Two instances are meant to be two GitHub accounts, but if they ever
+        // share one, the marker's label is what keeps the queues apart.
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new(
+                    "foro-sh/foro",
+                    7,
+                    "danielsteman",
+                    &[LABEL, &format!("{LABEL}:planned")],
+                )
+                .with_comment(&plan_comment("Claudius Secundus", "claudius-secundus")),
+            ],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        assert!(harness.claude.runs().is_empty(), "claude is never invoked");
+        assert_eq!(
+            harness.github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string()],
+            "with no plan of ours, the issue goes back to the planning step"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_keeps_hyphens_that_merely_end_its_last_line() {
+        let plan = format!(
+            "## Plan\nsee docs/adr-001---draft\n\n---\n\
+             :crown: Plan by Claudius Maximus. Implementing next sweep.\n<!-- cm:plan:{LABEL} -->"
+        );
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new(
+                    "foro-sh/foro",
+                    7,
+                    "danielsteman",
+                    &[LABEL, &format!("{LABEL}:planned")],
+                )
+                .with_comment(&plan),
+            ],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        let prompt = &harness.claude.prompts()[0];
+        assert!(prompt.contains("see docs/adr-001---draft"), "{prompt}");
     }
 
     #[tokio::test]
@@ -1216,9 +1301,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_sync_skips_the_issue_but_not_the_other_repos() {
+    async fn a_failed_sync_abandons_the_repo_but_not_the_other_repos() {
         // Nothing else re-syncs, so a clone that could not be synced is a tree
         // of unknown shape: it may still be sitting on another issue's branch.
+        // Every issue in that repo would fail the same way, so the repo is left
+        // for the next sweep rather than spending a connect timeout per issue.
         struct SelectivelyFailingGit;
         impl GitOps for SelectivelyFailingGit {
             fn sync_branch(
@@ -1247,6 +1334,7 @@ mod tests {
         );
         let github = FakeGithub::new(vec![
             FakeIssue::new("foro-sh/platform", 101, "danielsteman", &[LABEL]),
+            FakeIssue::new("foro-sh/platform", 102, "danielsteman", &[LABEL]),
             FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
         ]);
         let claude = FakeClaude::default();
@@ -1268,7 +1356,12 @@ mod tests {
         assert_eq!(
             github.labels("foro-sh/platform", 101),
             vec![LABEL.to_string()],
-            "the skipped issue keeps the trigger label, so the next sweep retries it"
+            "the abandoned issue keeps the trigger label, so the next sweep retries it"
+        );
+        assert!(
+            !github.calls().iter().any(|c| c.contains("num=102")),
+            "the rest of that repo's backlog is not even read: {:?}",
+            github.calls()
         );
     }
 

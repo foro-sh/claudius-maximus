@@ -37,6 +37,7 @@ impl FileStore {
     /// cannot find its token restarts into a device flow nobody answers.
     pub(crate) fn in_home() -> anyhow::Result<Self> {
         let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
             .context("HOME is unset, so there is nowhere to keep the GitHub token")?;
         Ok(Self::at(
             Path::new(&home)
