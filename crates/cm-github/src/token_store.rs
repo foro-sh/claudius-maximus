@@ -49,11 +49,10 @@ impl FileStore {
 impl TokenStore for FileStore {
     fn load(&self) -> anyhow::Result<Option<String>> {
         match fs::read_to_string(&self.path) {
-            // An empty file is a half-written one — `store` truncates before
-            // it writes, so a kill or a full disk leaves zero bytes behind.
-            // Reading that back as a token would send GitHub an empty bearer,
-            // be refused, and park the worker on "delete the stored token" for
-            // a file that holds nothing. No token is exactly what it is.
+            // An empty file holds no token, whatever put it there. Reading it
+            // back as one would send GitHub an empty bearer, be refused, and
+            // park the worker on "delete the stored token" for a file that
+            // holds nothing.
             Ok(token) => Ok(Some(token.trim().to_owned()).filter(|t| !t.is_empty())),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err).with_context(|| format!("reading {}", self.path.display())),
@@ -82,6 +81,10 @@ impl TokenStore for FileStore {
         // unattended worker would then sit on a device-flow prompt nobody is
         // there to answer.
         let temporary = self.path.with_extension("tmp");
+        // The temporary file is the one actually opened and written through,
+        // so it is the one that must not be a symlink — a leftover from an
+        // earlier crash is reused as-is.
+        refuse_symlink(&temporary)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
@@ -190,6 +193,23 @@ mod tests {
             !temporary.exists(),
             "the temporary file is renamed, not left"
         );
+    }
+
+    #[test]
+    fn refuses_to_write_through_a_symlinked_temporary_file() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        let decoy = home.path().join("decoy");
+        fs::write(&decoy, "untouched").unwrap();
+        fs::create_dir_all(home.path().join(".claudius-maximus")).unwrap();
+        std::os::unix::fs::symlink(
+            &decoy,
+            home.path().join(".claudius-maximus/github-token.tmp"),
+        )
+        .unwrap();
+
+        assert!(store.store("gho_token").is_err());
+        assert_eq!(fs::read_to_string(&decoy).unwrap(), "untouched");
     }
 
     #[test]
