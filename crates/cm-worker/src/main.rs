@@ -1,11 +1,13 @@
 mod claim;
 mod claude_cli;
 mod config;
+#[cfg(test)]
 mod fakes;
 mod notify;
 mod worker;
 
 use claim::ClaimError;
+use cm_github::OctocrabGithubClient;
 use config::Config;
 use notify::Notifier;
 use worker::Worker;
@@ -36,10 +38,12 @@ async fn main() -> anyhow::Result<()> {
         Err(ClaimError::Fatal(err)) => return Err(err),
     };
 
-    // TODO: swap for OctocrabGithubClient once merged (#4) — the fake keeps the
-    // binary runnable until then, and the state machine already talks to the
-    // trait, so it is this one line that changes.
-    let github = fakes::FakeGithub::default();
+    // Blocks on the device flow the first time this instance runs, so the
+    // one-time authorization happens before the first sweep rather than in the
+    // middle of one.
+    let github =
+        OctocrabGithubClient::login_or_load(&config.instance, &config.github_client_id).await?;
+    let token = github.token().to_owned();
     let git = cm_git::Git2Ops;
     let claude = claude_cli::ClaudeCli;
 
@@ -49,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         git: &git,
         claude: &claude,
         notifier: &notifier,
+        token: &token,
     }
     .run()
     .await

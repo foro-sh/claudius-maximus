@@ -5,7 +5,8 @@
 //!   author not in the repo's allowlist -> skipped entirely
 //!   blocked by an open issue           -> skipped until every blocker closes
 //!   labeled, no `<label>:planned`      -> Claude posts a plan comment, add planned
-//!   `<label>:planned`                  -> Claude implements + opens a PR, add `<label>:done`
+//!   `<label>:planned`                  -> Claude implements, worker pushes and
+//!                                         opens the PR, add `<label>:done`
 //!   `<label>:done`                     -> ignored
 //!
 //! No approval step: applying the label is the only human action required. The
@@ -16,7 +17,7 @@
 //! and a reboot loses nothing.
 
 use cm_git::GitOps;
-use cm_github::GithubClient;
+use cm_github::{GithubClient, Issue};
 
 use crate::claude_cli::Claude;
 use crate::config::{Config, RepoEntry};
@@ -28,6 +29,8 @@ pub struct Worker<'a> {
     pub git: &'a dyn GitOps,
     pub claude: &'a dyn Claude,
     pub notifier: &'a Notifier,
+    /// The instance's OAuth token, for pushing `claude/issue-N` over HTTPS.
+    pub token: &'a str,
 }
 
 impl Worker<'_> {
@@ -99,7 +102,7 @@ impl Worker<'_> {
                 ));
                 continue;
             }
-            if let Err(err) = self.process_issue(repo, issue.number).await {
+            if let Err(err) = self.process_issue(repo, &issue).await {
                 self.log(&format!(
                     "{}#{}: sweep error (continuing): {err:#}",
                     repo.repo, issue.number
@@ -109,7 +112,8 @@ impl Worker<'_> {
         Ok(())
     }
 
-    async fn process_issue(&self, repo: &RepoEntry, number: u64) -> anyhow::Result<()> {
+    async fn process_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
+        let number = issue.number;
         let labels = self.github.issue_labels(&repo.repo, number).await?;
         if labels.iter().any(|l| *l == self.done_label()) {
             return Ok(());
@@ -129,7 +133,7 @@ impl Worker<'_> {
             return Ok(());
         }
         if labels.iter().any(|l| *l == self.planned_label()) {
-            self.implement_issue(repo, number).await
+            self.implement_issue(repo, issue).await
         } else {
             self.plan_issue(repo, number).await
         }
@@ -178,7 +182,9 @@ run git — output the plan text only.",
         Ok(())
     }
 
-    async fn implement_issue(&self, repo: &RepoEntry, number: u64) -> anyhow::Result<()> {
+    async fn implement_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
+        let number = issue.number;
+        let branch = branch_for(number);
         self.log(&format!("{}#{}: implementing", repo.repo, number));
         // ponytail: `--dangerously-skip-permissions` (in `claude_cli`) is the
         // realistic headless mode for a bot on an isolated, unprivileged box.
@@ -190,33 +196,38 @@ run git — output the plan text only.",
             &self.config.implement_effort,
             &format!(
                 "Implement GitHub issue #{number} in {}, following this repo's CLAUDE.md.
-Sync main, work on branch claude/issue-{number} (reuse it if it already exists),
-implement the change, run the test/lint commands from CLAUDE.md. Commit in many
-small, logically-scoped commits as you go — one per coherent step — rather than
-a single large commit. Each commit must still pass commitlint (Conventional
-Commits). Then push and open a PR whose body contains 'Closes #{number}'. Do NOT
-merge. If a PR for this branch already exists, update it instead of opening a
-second one.",
+Sync main, work on branch {branch} (reuse it if it already exists), implement
+the change, run the test/lint commands from CLAUDE.md. Commit in many small,
+logically-scoped commits as you go — one per coherent step — rather than a
+single large commit. Each commit must still pass commitlint (Conventional
+Commits). Leave the commits on {branch} and stop there: do NOT push, do NOT
+open a pull request, do NOT merge anything. Pushing and opening the PR is the
+worker's job, and the box has no credentials for you to do it with.",
                 repo.repo
             ),
         );
 
         // A failed implementation is not a sweep error: the issue keeps the
         // trigger label and the next sweep retries it, exactly as the quota
-        // design intends.
-        match implemented {
-            Ok(_) => {
+        // design intends. The same goes for a failed push or PR — the commits
+        // are on the branch, so the retry picks up where this left off.
+        let shipped = match implemented {
+            Ok(_) => self.ship(repo, issue, &branch).await,
+            Err(err) => Err(err),
+        };
+
+        match shipped {
+            Ok(url) => {
                 self.github
                     .add_label(&repo.repo, number, &self.done_label())
                     .await?;
                 self.github
                     .remove_label(&repo.repo, number, &self.config.label)
                     .await?;
-                self.log(&format!("{}#{}: done", repo.repo, number));
+                self.log(&format!("{}#{}: done — {url}", repo.repo, number));
                 self.notifier.post(&format!(
-                    ":white_check_mark: shipped {}#{number} — PR opened — {}",
-                    repo.repo,
-                    issue_url(&repo.repo, number)
+                    ":white_check_mark: shipped {}#{number} — {url}",
+                    repo.repo
                 ));
             }
             Err(err) => {
@@ -232,6 +243,23 @@ second one.",
             }
         }
         Ok(())
+    }
+
+    /// Push what Claude committed and open the PR. Returns the PR's URL.
+    async fn ship(&self, repo: &RepoEntry, issue: &Issue, branch: &str) -> anyhow::Result<String> {
+        self.git.push(&repo.clone_path, branch, self.token)?;
+        self.github
+            .create_pull_request(
+                &repo.repo,
+                branch,
+                "main",
+                &issue.title,
+                &format!(
+                    "Closes #{}\n\n---\n:crown: Implemented by {}.",
+                    issue.number, self.config.instance
+                ),
+            )
+            .await
     }
 
     fn planned_label(&self) -> String {
@@ -252,6 +280,12 @@ second one.",
     fn log(&self, message: &str) {
         println!("{}: {message}", self.config.instance);
     }
+}
+
+/// One branch per issue, so two instances never collide: an issue belongs to
+/// exactly one queue.
+fn branch_for(number: u64) -> String {
+    format!("claude/issue-{number}")
 }
 
 fn issue_url(repo: &str, number: u64) -> String {
@@ -280,6 +314,7 @@ mod tests {
     fn config(repos: Vec<RepoEntry>, label: &str, instance: &str) -> Config {
         Config {
             repos,
+            github_client_id: "Iv1.testclientid".to_string(),
             label: label.to_string(),
             instance: instance.to_string(),
             plan_model: "claude-opus-5".to_string(),
@@ -326,6 +361,7 @@ mod tests {
                 git: &self.git,
                 claude: &self.claude,
                 notifier: &self.notifier,
+                token: "fake-token",
             }
             .sweep()
             .await;
@@ -373,12 +409,74 @@ mod tests {
         let implement_prompt = &harness.claude.prompts()[1];
         assert!(implement_prompt.contains("Implement GitHub issue #7 in foro-sh/foro"));
         assert!(implement_prompt.contains("branch claude/issue-7"));
+        assert!(implement_prompt.contains("do NOT push"));
+        assert_eq!(
+            harness.github.pulls(),
+            vec![(
+                "foro-sh/foro".to_string(),
+                "claude/issue-7".to_string(),
+                "Closes #7\n\n---\n:crown: Implemented by Claudius Maximus.".to_string(),
+            )],
+            "the worker opens the PR itself, off the branch Claude committed to"
+        );
+        assert!(
+            harness
+                .git
+                .calls()
+                .contains(&"push path=/clones/foro branch=claude/issue-7".to_string()),
+            "the branch is pushed before the PR is opened: {:?}",
+            harness.git.calls()
+        );
 
         harness.sweep().await;
         assert_eq!(
             harness.claude.runs().len(),
             2,
             ":done issues are ignored on every later sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
+        struct UnpushableGit;
+        impl GitOps for UnpushableGit {
+            fn sync_branch(&self, _: &std::path::Path, _: &str) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
+                anyhow::bail!("origin rejected the push")
+            }
+        }
+
+        let config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        let github = FakeGithub::new(vec![FakeIssue::new(
+            "foro-sh/foro",
+            7,
+            "danielsteman",
+            &[LABEL, &format!("{LABEL}:planned")],
+        )]);
+        let notifier = Notifier::new(None, config.instance.clone());
+
+        Worker {
+            config: &config,
+            github: &github,
+            git: &UnpushableGit,
+            claude: &FakeClaude::default(),
+            notifier: &notifier,
+            token: "fake-token",
+        }
+        .sweep()
+        .await;
+
+        assert!(github.pulls().is_empty(), "no PR without a pushed branch");
+        assert_eq!(
+            github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string(), format!("{LABEL}:planned")],
+            "the trigger label stays on, so the next sweep retries the implementation"
         );
     }
 
@@ -609,17 +707,8 @@ mod tests {
             fn sync_branch(&self, _: &std::path::Path, _: &str) -> anyhow::Result<()> {
                 anyhow::bail!("origin unreachable")
             }
-            fn commit(
-                &self,
-                _: &std::path::Path,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> anyhow::Result<Option<String>> {
-                unreachable!("the worker leaves commits to Claude")
-            }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
-                unreachable!("the worker leaves pushes to Claude")
+                unreachable!("nothing is implemented in this test, so nothing is pushed")
             }
         }
 
@@ -643,6 +732,7 @@ mod tests {
             git: &FailingGit,
             claude: &claude,
             notifier: &notifier,
+            token: "fake-token",
         }
         .sweep()
         .await;

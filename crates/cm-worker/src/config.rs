@@ -20,6 +20,9 @@ pub struct Config {
     pub repos: Vec<RepoEntry>,
     pub label: String,
     pub instance: String,
+    /// The GitHub OAuth App the device flow authorizes against — a deployment
+    /// detail, so it comes from the env like everything else.
+    pub github_client_id: String,
     pub plan_model: String,
     pub plan_effort: String,
     pub implement_model: String,
@@ -35,9 +38,15 @@ impl Config {
             anyhow::anyhow!("set REPOS=owner/name=/path/to/clone[,owner/name2=/path/to/clone2]")
         })?;
         let repos = parse_repos(&repos_raw)?;
+        let github_client_id = std::env::var("GITHUB_CLIENT_ID").map_err(|_| {
+            anyhow::anyhow!(
+                "set GITHUB_CLIENT_ID to the client id of a GitHub OAuth App with device flow                  enabled — the worker authorizes against it"
+            )
+        })?;
 
         Ok(Config {
             repos,
+            github_client_id,
             label: env_or("LABEL", "claudius-maximus"),
             instance: env_or("INSTANCE", "Claudius Maximus"),
             plan_model: env_or("PLAN_MODEL", "claude-opus-5"),
