@@ -8,14 +8,16 @@ mod token_store;
 
 pub use client::OctocrabGithubClient;
 
-/// One issue as the worker's state machine needs to see it. The title rides
-/// along with the list, so the PR can be titled after the issue without a
-/// second call.
+/// One issue as the worker's state machine needs to see it. The title and
+/// body ride along with the list: the title names the PR, and the body is the
+/// work order Claude is handed — the box it runs on has no GitHub credentials
+/// of its own to read the issue with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
     pub number: u64,
     pub author: String,
     pub title: String,
+    pub body: String,
 }
 
 /// Everything the worker needs from GitHub. `repo` is always `"owner/name"`.
@@ -34,6 +36,11 @@ pub trait GithubClient: Send + Sync {
     async fn add_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn remove_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<()>;
+    /// Every comment body on the issue, oldest first. The worker reads its own
+    /// plan comment back out of this on the implementing sweep — the plan is
+    /// written one sweep and used the next, and GitHub is the only state the
+    /// worker keeps.
+    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>>;
     /// Open a pull request from `head` onto `base`, returning its URL. If one
     /// is already open for `head` — the branch is reused across retries — its
     /// URL comes back instead: a second PR for one issue is the thing to

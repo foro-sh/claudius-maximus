@@ -155,6 +155,7 @@ impl GithubClient for OctocrabGithubClient {
                 number: i.number,
                 author: i.user.login,
                 title: i.title,
+                body: i.body.unwrap_or_default(),
             })
             .collect())
     }
@@ -207,6 +208,26 @@ impl GithubClient for OctocrabGithubClient {
             .await
             .with_context(|| format!("commenting on {repo}#{number}"))?;
         Ok(())
+    }
+
+    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>> {
+        let (owner, name) = self.repo(repo)?;
+        let page = self
+            .crab
+            .issues(owner, name)
+            .list_comments(number)
+            .per_page(100)
+            .send()
+            .await
+            .with_context(|| format!("listing comments on {repo}#{number}"))?;
+
+        Ok(self
+            .crab
+            .all_pages(page)
+            .await?
+            .into_iter()
+            .map(|c| c.body.unwrap_or_default())
+            .collect())
     }
 
     async fn create_pull_request(
@@ -367,7 +388,7 @@ mod tests {
             "number": number,
             "state": "open",
             "title": "something to do",
-            "body": null,
+            "body": "the work order",
             "user": author(login),
             "labels": [],
             "assignees": [],
@@ -604,6 +625,7 @@ mod tests {
                 number: 12,
                 author: "danielsteman".to_owned(),
                 title: "something to do".to_owned(),
+                body: "the work order".to_owned(),
             }]
         );
     }
@@ -665,6 +687,38 @@ mod tests {
             .remove_label("foro-sh/platform", 12, "cm:planning")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn issue_comments_returns_the_bodies_oldest_first() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        let comment = |id: u64, body: &str| {
+            json!({
+                "id": id,
+                "node_id": format!("IC_{id}"),
+                "url": format!("https://api.github.com/c/{id}"),
+                "html_url": format!("https://github.com/c/{id}"),
+                "issue_url": "https://api.github.com/i/12",
+                "body": body,
+                "user": author("claudius"),
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/platform/issues/12/comments"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([comment(1, "a plan"), comment(2, "a later note")])),
+            )
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client.issue_comments("foro-sh/platform", 12).await.unwrap(),
+            vec!["a plan".to_owned(), "a later note".to_owned()]
+        );
     }
 
     #[tokio::test]
