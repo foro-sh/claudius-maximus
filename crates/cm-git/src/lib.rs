@@ -3,37 +3,21 @@
 //! fake (foro-sh/claudius-maximus#1).
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use git2::build::CheckoutBuilder;
 use git2::{
-    BranchType, Cred, Direction, FetchOptions, IndexAddOption, PushOptions, RemoteCallbacks,
-    Repository, ResetType, Signature,
+    BranchType, Cred, Direction, FetchOptions, PushOptions, RemoteCallbacks, Repository, ResetType,
 };
 
-/// Everything the worker needs from git — no `git` CLI, per #1.
-///
-/// A real implementation uses `git2` (vendored libgit2). Because `git2` never
-/// invokes repo hooks, `commit` below must itself reject a message that
-/// isn't a valid Conventional Commit — there is no `commit-msg` hook backing
-/// it up the way there is for a human `git commit`.
+/// Everything the worker needs from git — no `git` CLI, per #1. Claude makes
+/// the commits (with its own git, inside the clone); the worker only syncs the
+/// clone and pushes the finished branch, which is the half that needs the
+/// instance's OAuth token.
 pub trait GitOps: Send + Sync {
     /// Fetch `origin` and hard-reset `branch` to `origin/<default branch>`,
     /// creating the local branch if it doesn't exist yet. Equivalent of
     /// `worker.sh`'s `git fetch && git checkout <branch> && git reset --hard`.
     fn sync_branch(&self, clone_path: &Path, branch: &str) -> anyhow::Result<()>;
-
-    /// Commit all pending changes in `clone_path`. Must validate `message`
-    /// against Conventional Commits itself before creating the commit —
-    /// return `Err` on an invalid message rather than let a non-conforming
-    /// commit through, since no hook will catch it later. `Ok(None)` means
-    /// there was nothing to commit.
-    fn commit(
-        &self,
-        clone_path: &Path,
-        message: &str,
-        author_name: &str,
-        author_email: &str,
-    ) -> anyhow::Result<Option<String>>;
 
     /// Push `branch` to `origin` over HTTPS, authenticated with `token`
     /// (the same OAuth token `cm-github`'s client holds).
@@ -85,8 +69,8 @@ impl GitOps for Git2Ops {
         // The checkout is what clears untracked files, which a plain
         // `reset --hard` leaves behind: the worker reuses one clone across
         // issues, so whatever a killed Claude run dropped in the tree would
-        // otherwise be swept into the next issue's commit by `commit`'s
-        // `add_all`. Ignored files (`target/`) stay — that's the build cache.
+        // otherwise be swept into the next issue's commits by Claude.
+        // Ignored files (`target/`) stay — that's the build cache.
         // `reset` can't do it in one step; it overrides the checkout strategy
         // it is handed.
         let mut checkout = CheckoutBuilder::new();
@@ -94,32 +78,6 @@ impl GitOps for Git2Ops {
         repo.checkout_tree(upstream.as_object(), Some(&mut checkout))?;
         repo.reset(upstream.as_object(), ResetType::Hard, None)?;
         Ok(())
-    }
-
-    fn commit(
-        &self,
-        clone_path: &Path,
-        message: &str,
-        author_name: &str,
-        author_email: &str,
-    ) -> Result<Option<String>> {
-        validate_conventional_commit(message)?;
-
-        let repo = Repository::open(clone_path)?;
-        let mut index = repo.index()?;
-        index.add_all(["*"], IndexAddOption::DEFAULT, None)?;
-        index.write()?;
-
-        let tree_id = index.write_tree()?;
-        let head = repo.head()?.peel_to_commit()?;
-        if head.tree_id() == tree_id {
-            return Ok(None);
-        }
-
-        let tree = repo.find_tree(tree_id)?;
-        let author = Signature::now(author_name, author_email)?;
-        let oid = repo.commit(Some("HEAD"), &author, &author, message, &tree, &[&head])?;
-        Ok(Some(oid.to_string()))
     }
 
     fn push(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
@@ -141,60 +99,13 @@ impl GitOps for Git2Ops {
     }
 }
 
-const TYPES: [&str; 9] = [
-    "feat", "fix", "chore", "ci", "docs", "style", "refactor", "perf", "test",
-];
-
-/// A faithful-enough subset of `@commitlint/config-conventional`: it rejects
-/// what commitlint's CI job would reject, so a libgit2 commit (which never
-/// fires `commit-msg`) can't sneak a bad message past it.
-fn validate_conventional_commit(message: &str) -> Result<()> {
-    let header = message.lines().next().unwrap_or_default();
-    if header.chars().count() > 100 {
-        bail!("header longer than 100 characters: {header:?}");
-    }
-
-    let (prefix, description) = header
-        .split_once(": ")
-        .with_context(|| format!("header is not `type(scope): description`: {header:?}"))?;
-    let prefix = prefix.strip_suffix('!').unwrap_or(prefix);
-
-    let (kind, scope) = match prefix.split_once('(') {
-        Some((kind, rest)) => (
-            kind,
-            Some(
-                rest.strip_suffix(')')
-                    .with_context(|| format!("unterminated scope: {header:?}"))?,
-            ),
-        ),
-        None => (prefix, None),
-    };
-
-    if !TYPES.contains(&kind) {
-        bail!("type {kind:?} is not one of {TYPES:?}");
-    }
-    if scope.is_some_and(str::is_empty) {
-        bail!("empty scope: {header:?}");
-    }
-    if description.is_empty() {
-        bail!("empty description: {header:?}");
-    }
-    if description.ends_with('.') {
-        bail!("description ends with a period: {header:?}");
-    }
-    if description.starts_with(char::is_uppercase) {
-        bail!("description starts with an uppercase letter: {header:?}");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
 
-    use git2::RepositoryInitOptions;
+    use git2::{IndexAddOption, RepositoryInitOptions, Signature};
     use tempfile::TempDir;
 
     fn commit_all(repo: &Repository, message: &str) {
@@ -282,99 +193,6 @@ mod tests {
         assert!(!clone.join("leftovers/scratch.txt").exists());
     }
 
-    #[test]
-    fn commit_stages_everything_and_returns_the_new_sha() {
-        let (_tmp, clone) = fixture("main");
-        fs::write(clone.join("new.txt"), "hello\n").unwrap();
-        fs::create_dir_all(clone.join("src/deep")).unwrap();
-        fs::write(clone.join("src/deep/mod.rs"), "// written by claude\n").unwrap();
-        fs::remove_file(clone.join("README.md")).unwrap();
-
-        let sha = Git2Ops
-            .commit(&clone, "feat: add new file", "Bot", "bot@example.com")
-            .unwrap()
-            .expect("something was staged");
-
-        let repo = Repository::open(&clone).unwrap();
-        let head = repo.head().unwrap().peel_to_commit().unwrap();
-        assert_eq!(head.id().to_string(), sha);
-        assert_eq!(head.message(), Some("feat: add new file"));
-        let tree = head.tree().unwrap();
-        assert!(tree.get_name("new.txt").is_some());
-        assert!(tree.get_path(Path::new("src/deep/mod.rs")).is_ok());
-        assert!(tree.get_name("README.md").is_none());
-    }
-
-    #[test]
-    fn commit_is_none_when_nothing_changed() {
-        let (_tmp, clone) = fixture("main");
-        let committed = Git2Ops
-            .commit(&clone, "feat: nothing to see", "Bot", "bot@example.com")
-            .unwrap();
-        assert!(committed.is_none());
-    }
-
-    #[test]
-    fn commit_rejects_a_bad_message_before_touching_the_repo() {
-        let (_tmp, clone) = fixture("main");
-        fs::write(clone.join("new.txt"), "hello\n").unwrap();
-
-        Git2Ops
-            .commit(&clone, "Added a new file.", "Bot", "bot@example.com")
-            .unwrap_err();
-
-        let repo = Repository::open(&clone).unwrap();
-        assert_eq!(
-            repo.head().unwrap().peel_to_commit().unwrap().message(),
-            Some("chore: seed")
-        );
-    }
-
-    #[test]
-    fn accepts_what_commitlint_accepts() {
-        for message in [
-            "feat: add device-flow login",
-            "feat(worker): add device-flow login",
-            "fix(cm-git): reset onto origin's default branch",
-            "chore!: drop the bash worker",
-            "refactor(worker)!: split the state machine",
-            "docs: describe the label state machine\n\nBody paragraph here.",
-            "test: cover the conventional-commit validator",
-        ] {
-            validate_conventional_commit(message)
-                .unwrap_or_else(|e| panic!("{message:?} should be valid: {e}"));
-        }
-    }
-
-    #[test]
-    fn rejects_what_commitlint_rejects() {
-        for message in [
-            "",
-            "add device-flow login",          // no type
-            "feat:add device-flow login",     // no space after the colon
-            "feat add device-flow login",     // no colon
-            "Feat: add device-flow login",    // uppercase type
-            "wip: add device-flow login",     // type not in the allowed set
-            "feature: add device-flow login", // near-miss type
-            "feat(): add device-flow login",  // empty scope
-            "feat(worker: add device-flow",   // unterminated scope
-            "feat: Add device-flow login",    // sentence-case description
-            "feat: add device-flow login.",   // trailing period
-            "feat: ",                         // empty description
-        ] {
-            assert!(
-                validate_conventional_commit(message).is_err(),
-                "{message:?} should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_an_overlong_header() {
-        let message = format!("feat: {}", "x".repeat(95));
-        assert!(validate_conventional_commit(&message).is_err());
-    }
-
     /// Needs a real remote and a real token; run with
     /// `CM_GIT_PUSH_REMOTE=https://github.com/<owner>/<repo>.git \
     ///  CM_GIT_PUSH_TOKEN=<token> cargo test -p cm-git -- --ignored`.
@@ -392,10 +210,7 @@ mod tests {
         let branch = format!("cm/push-test-{}", std::process::id());
         Git2Ops.sync_branch(&clone, &branch).unwrap();
         fs::write(clone.join("push-test.txt"), "hello\n").unwrap();
-        Git2Ops
-            .commit(&clone, "test: push smoke test", "Bot", "bot@example.com")
-            .unwrap()
-            .unwrap();
+        commit_all(&Repository::open(&clone).unwrap(), "test: push smoke test");
         Git2Ops.push(&clone, &branch, &token).unwrap();
     }
 }
