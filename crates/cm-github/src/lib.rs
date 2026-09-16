@@ -8,11 +8,14 @@ mod token_store;
 
 pub use client::OctocrabGithubClient;
 
-/// One issue as the worker's state machine needs to see it.
+/// One issue as the worker's state machine needs to see it. The title rides
+/// along with the list, so the PR can be titled after the issue without a
+/// second call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
     pub number: u64,
     pub author: String,
+    pub title: String,
 }
 
 /// Everything the worker needs from GitHub. `repo` is always `"owner/name"`.
@@ -31,6 +34,19 @@ pub trait GithubClient: Send + Sync {
     async fn add_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn remove_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<()>;
+    /// Open a pull request from `head` onto `base`, returning its URL. If one
+    /// is already open for `head` — the branch is reused across retries — its
+    /// URL comes back instead: a second PR for one issue is the thing to
+    /// avoid, not an error to report.
+    async fn create_pull_request(
+        &self,
+        repo: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> anyhow::Result<String>;
+
     /// True if any open issue is listed under this issue's `blocked_by`
     /// dependency relationship (the GitHub feature `declaring-issue-dependencies`
     /// in the platform repo writes edges into).

@@ -104,6 +104,25 @@ impl OctocrabGithubClient {
         &self.token
     }
 
+    /// The open PR whose head is `branch`, if there is one.
+    async fn open_pull_request_for(
+        &self,
+        owner: &str,
+        name: &str,
+        branch: &str,
+    ) -> anyhow::Result<Option<octocrab::models::pulls::PullRequest>> {
+        let page = self
+            .crab
+            .pulls(owner, name)
+            .list()
+            .head(format!("{owner}:{branch}"))
+            .state(State::Open)
+            .send()
+            .await
+            .with_context(|| format!("listing open PRs for {owner}/{name} {branch}"))?;
+        Ok(page.items.into_iter().next())
+    }
+
     fn repo<'a>(&self, repo: &'a str) -> anyhow::Result<(&'a str, &'a str)> {
         repo.split_once('/')
             .filter(|(owner, name)| !owner.is_empty() && !name.is_empty())
@@ -135,6 +154,7 @@ impl GithubClient for OctocrabGithubClient {
             .map(|i| Issue {
                 number: i.number,
                 author: i.user.login,
+                title: i.title,
             })
             .collect())
     }
@@ -187,6 +207,46 @@ impl GithubClient for OctocrabGithubClient {
             .await
             .with_context(|| format!("commenting on {repo}#{number}"))?;
         Ok(())
+    }
+
+    async fn create_pull_request(
+        &self,
+        repo: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> anyhow::Result<String> {
+        let (owner, name) = self.repo(repo)?;
+        let created = self
+            .crab
+            .pulls(owner, name)
+            .create(title, head, base)
+            .body(body)
+            .send()
+            .await;
+
+        let pr = match created {
+            Ok(pr) => pr,
+            // 422 is what GitHub answers when a PR for this head already
+            // exists — the branch is reused when an implementation is retried.
+            Err(octocrab::Error::GitHub { source, .. })
+                if source.status_code == http::StatusCode::UNPROCESSABLE_ENTITY =>
+            {
+                self.open_pull_request_for(owner, name, head)
+                    .await?
+                    .with_context(|| {
+                        format!("GitHub refused a PR for {repo} {head} -> {base}: {source:?}")
+                    })?
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("opening a PR for {repo} {head} -> {base}"));
+            }
+        };
+
+        pr.html_url
+            .map(|url| url.to_string())
+            .with_context(|| format!("PR for {repo} {head} came back without a URL"))
     }
 
     async fn blocked_by_open_issue(&self, repo: &str, number: u64) -> anyhow::Result<bool> {
@@ -543,6 +603,7 @@ mod tests {
             vec![Issue {
                 number: 12,
                 author: "danielsteman".to_owned(),
+                title: "something to do".to_owned(),
             }]
         );
     }
@@ -632,6 +693,127 @@ mod tests {
             .comment("foro-sh/platform", 12, "planning")
             .await
             .unwrap();
+    }
+
+    fn pull_request_json(number: u64, head: &str) -> Value {
+        json!({
+            "id": number,
+            "node_id": "PR_1",
+            "url": format!("https://api.github.com/repos/foro-sh/platform/pulls/{number}"),
+            "html_url": format!("https://github.com/foro-sh/platform/pull/{number}"),
+            "number": number,
+            "state": "open",
+            "title": "something to do",
+            "user": author("claudius"),
+            "head": { "label": format!("foro-sh:{head}"), "ref": head, "sha": "deadbeef" },
+            "base": { "label": "foro-sh:main", "ref": "main", "sha": "cafebabe" },
+        })
+    }
+
+    #[tokio::test]
+    async fn create_pull_request_opens_the_pr_and_returns_its_url() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/repos/foro-sh/platform/pulls"))
+            .and(body_json(json!({
+                "title": "something to do",
+                "head": "claude/issue-12",
+                "base": "main",
+                "body": "Closes #12",
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(pull_request_json(30, "claude/issue-12")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client
+                .create_pull_request(
+                    "foro-sh/platform",
+                    "claude/issue-12",
+                    "main",
+                    "something to do",
+                    "Closes #12",
+                )
+                .await
+                .unwrap(),
+            "https://github.com/foro-sh/platform/pull/30"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_pull_request_reuses_the_pr_already_open_for_the_branch() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        // What GitHub answers for a head that already has an open PR.
+        Mock::given(method("POST"))
+            .and(path("/repos/foro-sh/platform/pulls"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+                "message": "Validation Failed",
+                "errors": [{ "message": "A pull request already exists for foro-sh:claude/issue-12." }],
+                "documentation_url": "https://docs.github.com/rest",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/platform/pulls"))
+            .and(query_param("head", "foro-sh:claude/issue-12"))
+            .and(query_param("state", "open"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([pull_request_json(29, "claude/issue-12")])),
+            )
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client
+                .create_pull_request(
+                    "foro-sh/platform",
+                    "claude/issue-12",
+                    "main",
+                    "something to do",
+                    "Closes #12",
+                )
+                .await
+                .unwrap(),
+            "https://github.com/foro-sh/platform/pull/29",
+            "a retry must reuse the open PR, never open a second one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_pr_with_no_pr_open_for_the_branch_is_an_error() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/repos/foro-sh/platform/pulls"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+                "message": "Validation Failed",
+                "errors": [{ "message": "No commits between main and claude/issue-12." }],
+                "documentation_url": "https://docs.github.com/rest",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/platform/pulls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&server)
+            .await;
+
+        client
+            .create_pull_request(
+                "foro-sh/platform",
+                "claude/issue-12",
+                "main",
+                "something to do",
+                "Closes #12",
+            )
+            .await
+            .unwrap_err();
     }
 
     async fn blocked_by(server: &MockServer, blockers: Value) {
