@@ -109,7 +109,7 @@ chmod +x /home/claudebot/claudius-maximus/claudius-maximus
 **GitHub login is the binary's own job.** On first run it starts GitHub's OAuth
 device flow: it prints a one-time code and a verification URL, you open the URL
 once as the account this instance acts as, and the token is stored in
-`$HOME/.claudius-maximus/github-token-<instance>` (mode `0600`) — not in
+`$HOME/.claudius-maximus/github-token` (mode `0600`) — not in
 `/etc/claudius-<user>.env`. A file rather than the OS keyring because the
 instance is a `nologin` user under systemd, with no login session and no Secret
 Service for a keyring to live in; `$HOME` already holds that instance's Claude
@@ -292,7 +292,7 @@ automated:
 3. **The GitHub device flow.** Run the worker once in the foreground as that user,
    open the printed code and URL as this instance's GitHub account, then Ctrl-C.
    The script prints the exact command; the token lands in
-   `$HOME/.claudius-maximus/github-token-<instance>`, never in the env file.
+   `$HOME/.claudius-maximus/github-token`, never in the env file.
 
 Then start it:
 

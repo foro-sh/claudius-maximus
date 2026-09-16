@@ -95,10 +95,10 @@ impl Worker<'_> {
                     repo.repo, issue.number
                 ));
                 self.notifier.post_once(
-                    // Keyed on the repo and the error rather than the issue:
-                    // a rate limit or an outage fails every issue in the
+                    // Keyed on the repo alone: a rate limit, an unreachable
+                    // origin or a revoked token fails every issue in the
                     // backlog at once, and that is one piece of news.
-                    &format!("sweep {} {err:#}", repo.repo),
+                    &sweep_failure_key(&repo.repo),
                     &format!(
                         ":warning: {}#{} could not be processed — will retry — {}",
                         repo.repo,
@@ -197,7 +197,7 @@ or run git — output the plan text only.
             .await?;
         // The repo is evidently reachable and this issue plannable, so an
         // earlier sweep failure on it is no longer the current state.
-        self.notifier.forget(&format!("sweep {} ", repo.repo));
+        self.notifier.forget(&sweep_failure_key(&repo.repo));
         self.notifier.post(&format!(
             ":scroll: planned {}#{number} — implementing next sweep — {}",
             repo.repo,
@@ -246,9 +246,11 @@ or run git — output the plan text only.
                     .await?;
                 self.log(&format!("{}#{}: done — {url}", repo.repo, number));
                 // Whatever went wrong here before is history now, so the next
-                // failure on this issue is news again rather than old news.
+                // failure is news again rather than old news — for this issue,
+                // and for the repo, which is evidently reachable.
                 self.notifier
-                    .forget(&format!("implement {}#{number} ", repo.repo));
+                    .forget(&implement_failure_key(&repo.repo, number));
+                self.notifier.forget(&sweep_failure_key(&repo.repo));
                 self.notifier.post(&format!(
                     ":white_check_mark: shipped {}#{number} — {url}",
                     repo.repo
@@ -260,10 +262,11 @@ or run git — output the plan text only.
                     repo.repo, number
                 ));
                 self.notifier.post_once(
-                    // The error is in the key so that this issue failing
-                    // later for a different reason is heard: the worker is
-                    // built to run for weeks without restarting.
-                    &format!("implement {}#{number} {err:#}", repo.repo),
+                    // Keyed on the issue and the stage, not on the error: the
+                    // error is usually a whole `claude` stderr, which differs
+                    // every run. `forget` below is what makes it sayable
+                    // again.
+                    &implement_failure_key(&repo.repo, number),
                     &format!(
                         ":warning: {}#{number} implement failed — will retry — {}",
                         repo.repo,
@@ -418,6 +421,17 @@ worker's job, and the box has no credentials for you to do it with.
     fn log(&self, message: &str) {
         println!("{}: {message}", self.config.instance);
     }
+}
+
+/// Names the repo as a whole for [`Notifier::post_once`]: anything that fails
+/// before an issue is reached fails for every issue in that repo.
+fn sweep_failure_key(repo: &str) -> String {
+    format!("sweep {repo}")
+}
+
+/// Names one issue's implementation for [`Notifier::post_once`].
+fn implement_failure_key(repo: &str, number: u64) -> String {
+    format!("implement {repo}#{number}")
 }
 
 /// The lines the worker writes onto its own plan comment to find it again.

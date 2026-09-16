@@ -29,17 +29,19 @@ pub(crate) struct FileStore {
 }
 
 impl FileStore {
-    /// `$HOME/.claudius-maximus/github-token-<instance>`. An instance is meant
-    /// to be its own unix user, so the home directory already separates them —
-    /// but two instances sharing one user would otherwise silently share one
-    /// GitHub identity, with the second reusing whatever the first authorized.
-    pub(crate) fn in_home(instance_name: &str) -> anyhow::Result<Self> {
+    /// `$HOME/.claudius-maximus/github-token`. One instance per unix user, so
+    /// the home directory is what keeps two instances' tokens apart — and
+    /// nothing in the name depends on `$INSTANCE`, which is a display name an
+    /// operator may reasonably reword. Keying the file on it would turn that
+    /// edit into a token the worker cannot find, and an unattended worker that
+    /// cannot find its token restarts into a device flow nobody answers.
+    pub(crate) fn in_home() -> anyhow::Result<Self> {
         let home = std::env::var_os("HOME")
             .context("HOME is unset, so there is nowhere to keep the GitHub token")?;
         Ok(Self::at(
             Path::new(&home)
                 .join(".claudius-maximus")
-                .join(format!("github-token-{}", slug(instance_name))),
+                .join("github-token"),
         ))
     }
 
@@ -113,27 +115,6 @@ impl TokenStore for FileStore {
     }
 }
 
-/// `$INSTANCE` is a display name — "Claudius Maximus" — and this is it as one
-/// filename-safe word.
-fn slug(instance_name: &str) -> String {
-    let slug: String = instance_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let slug = slug.trim_matches('-').to_owned();
-    if slug.is_empty() {
-        "instance".to_owned()
-    } else {
-        slug
-    }
-}
-
 /// Refuses a path that is a symlink. A path that does not exist yet is fine —
 /// it is the redirect we are looking for, not the absence. Any other stat
 /// error is propagated rather than read as "not a symlink": a path we cannot
@@ -157,14 +138,6 @@ mod tests {
 
     fn store(home: &TempDir) -> FileStore {
         FileStore::at(home.path().join(".claudius-maximus").join("github-token"))
-    }
-
-    #[test]
-    fn two_instances_under_one_home_do_not_share_a_token() {
-        let one = FileStore::in_home("Claudius Maximus").unwrap().location();
-        let two = FileStore::in_home("Claudius Secundus").unwrap().location();
-        assert!(one.ends_with("github-token-claudius-maximus"), "{one}");
-        assert_ne!(one, two);
     }
 
     #[test]

@@ -30,32 +30,22 @@ impl Notifier {
     /// issue in it. Posting each of those once says the same thing as posting
     /// them a thousand times a day, and stays readable.
     ///
-    /// `key` is separate from the text so it can carry the error the text
-    /// does not: one repo-wide outage collapses to one line however many
-    /// issues hit it, while the same issue failing later for a different
-    /// reason is a different key, and gets said.
+    /// `key` names what is failing — a repo, or one issue at one stage — and
+    /// deliberately not *why*: the commonest error carries a whole `claude`
+    /// stderr, which varies run to run, so keying on it would post every sweep
+    /// and keep a copy of each message for the life of the process.
+    /// [`Notifier::forget`] is what re-arms a key, so each failure is said once
+    /// per run of bad luck rather than once ever.
     pub fn post_once(&self, key: &str, text: &str) {
-        let mut said = self.said.lock().unwrap();
-        // A failure whose message varies every sweep — a stderr dump, an error
-        // carrying a request id — would otherwise grow this set forever in a
-        // process built to run for weeks. Forgetting everything at the cap
-        // costs at most one repeated line per failure still outstanding.
-        if said.len() >= 512 {
-            said.clear();
-        }
-        if said.insert(key.to_owned()) {
-            drop(said);
+        if self.said.lock().unwrap().insert(key.to_owned()) {
             self.post(text);
         }
     }
 
-    /// Forgets every key starting with `prefix`, so a failure that recurs
-    /// after things worked again is heard rather than swallowed as old news.
-    pub fn forget(&self, prefix: &str) {
-        self.said
-            .lock()
-            .unwrap()
-            .retain(|key| !key.starts_with(prefix));
+    /// Forgets a key, so a failure that recurs after things worked again is
+    /// heard rather than swallowed as old news.
+    pub fn forget(&self, key: &str) {
+        self.said.lock().unwrap().remove(key);
     }
 
     /// Posts to Mattermost if configured. Never fails the worker on a bad
