@@ -1,5 +1,6 @@
 //! The one place `std::process::Command` runs, per #1 — `claude` has no
 //! Rust SDK, unlike GitHub (`cm-github`) and git (`cm-git`).
+use anyhow::Context;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -43,21 +44,21 @@ impl Claude for ClaudeCli {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        // Written from its own thread: a prompt larger than the pipe buffer
-        // would otherwise block here while `claude` blocks writing output
-        // nobody is reading yet.
+        // Written from its own thread, and joined only after the output has
+        // been drained: `claude` can write more than a pipe buffer's worth of
+        // output before it has read the whole prompt, so a parent that
+        // finishes writing before it starts reading deadlocks against it.
         let mut stdin = child.stdin.take().expect("stdin was piped");
-        let written = std::thread::scope(|scope| {
+        let (output, written) = std::thread::scope(|scope| {
             let writer = scope.spawn(move || stdin.write_all(prompt.as_bytes()));
-            writer.join()
+            let output = child.wait_with_output();
+            (output, writer.join())
         });
-        match written {
-            Ok(result) => result?,
-            Err(_) => anyhow::bail!("the thread feeding claude its prompt panicked"),
-        }
+        let output = output?;
 
-        let output = child.wait_with_output()?;
-
+        // Checked before the write's own result: a `claude` that exits early
+        // breaks the pipe, and its status and stderr say why far better than
+        // "broken pipe" does.
         if !output.status.success() {
             anyhow::bail!(
                 "claude exited with {}: {}",
@@ -65,6 +66,11 @@ impl Claude for ClaudeCli {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        match written {
+            Ok(result) => result.context("feeding claude its prompt")?,
+            Err(_) => anyhow::bail!("the thread feeding claude its prompt panicked"),
+        }
+
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
