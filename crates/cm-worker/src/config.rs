@@ -1,7 +1,7 @@
 //! `$REPOS` and the rest of the worker's env-var config. Rust port of
 //! `infra/claudius-maximus/repos.sh` + `worker.sh`'s config block in the
 //! platform repo — same format, same defaults, so migrating an instance's
-//! `/etc/claudius-<user>.env` needs no edits.
+//! `/etc/<user>.env` needs no edits.
 use std::path::PathBuf;
 use std::time::Duration;
 

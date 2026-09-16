@@ -60,7 +60,7 @@ A `$REPOS` entry can end in a third field: a `|`-separated allowlist of issue
 before any `claude` call.
 
 ```
-foro-sh/foro=/home/claudebot/repos/foro=danielsteman|thijssdaniels
+foro-sh/foro=/home/claudius-maximus/repos/foro=danielsteman|thijssdaniels
 ```
 
 A **public** repo needs this gate: without it, a stranger's issue would become a
@@ -74,8 +74,8 @@ no separate approval step. Logins are matched case-insensitively.
 ```bash
 cargo build --release          # target/release/claudius-maximus
 scp target/release/claudius-maximus \
-    <box>:/home/claudebot/claudius-maximus/claudius-maximus
-ssh <box> sudo systemctl restart claudius@claudebot
+    <box>:/home/claudius-maximus/claudius-maximus/claudius-maximus
+ssh <box> sudo systemctl restart claudius@claudius-maximus
 ```
 
 `git2` is built with `vendored-libgit2`/`vendored-openssl`, so the result is one
@@ -83,12 +83,14 @@ binary with no system libgit2, no OpenSSL, and no `git`, `gh` or `curl` to find
 at runtime. Build on a box matching the target's architecture (or cross-compile);
 the only thing that has to exist on the server besides the binary is Claude Code.
 
-## One-time server setup (run as `claudebot`)
+## One-time server setup (run as `claudius-maximus`)
 
 This is the first instance, set up by hand. Every step here is **per
 instance** — each further subscription repeats all of it as its own unix user,
 with its own label triad, which is what `add-instance.sh` automates
-([Adding an instance](#adding-an-instance)).
+([Adding an instance](#adding-an-instance)). Prefer that script even for the
+first slot: it assigns `claudius-maximus` and wires user, label, and display
+name together.
 
 ```bash
 # 1. Claude Code >= 2.1.186 (RETRY_WATCHDOG), subscription login, no API key.
@@ -97,28 +99,28 @@ claude login && claude doctor
 unset ANTHROPIC_API_KEY            # and remove it from any profile/env
 
 # 2. Clone every target repo (one clone per entry in $REPOS).
-git clone https://github.com/foro-sh/platform.git /home/claudebot/repos/platform
-git clone https://github.com/foro-sh/foro.git     /home/claudebot/repos/foro
+git clone https://github.com/foro-sh/platform.git /home/claudius-maximus/repos/platform
+git clone https://github.com/foro-sh/foro.git     /home/claudius-maximus/repos/foro
 
 # 3. Drop the binary in place.
-mkdir -p /home/claudebot/claudius-maximus
+mkdir -p /home/claudius-maximus/claudius-maximus
 # ...scp target/release/claudius-maximus here, then:
-chmod +x /home/claudebot/claudius-maximus/claudius-maximus
+chmod +x /home/claudius-maximus/claudius-maximus/claudius-maximus
 ```
 
 **GitHub login is the binary's own job.** On first run it starts GitHub's OAuth
 device flow: it prints a one-time code and a verification URL, you open the URL
 once as the account this instance acts as, and the token is stored in the OS
-keyring (Secret Service on Linux) — not in `/etc/claudius-<user>.env`. Same
+keyring (Secret Service on Linux) — not in `/etc/<user>.env`. Same
 one-time ceremony `gh auth login` used to be, with no `gh` CLI on the box at all.
 Run it in the foreground once before enabling the unit, so you can complete the
 flow. It validates its config before anything else, so write
-[`/etc/claudius-claudebot.env`](#config) first and source it for this one run —
-systemd reads it for you afterwards:
+[`/etc/claudius-maximus.env`](#config) first and source it for this one
+run — systemd reads it for you afterwards:
 
 ```bash
-set -a; . /etc/claudius-claudebot.env; set +a
-/home/claudebot/claudius-maximus/claudius-maximus     # prints code + URL
+set -a; . /etc/claudius-maximus.env; set +a
+/home/claudius-maximus/claudius-maximus/claudius-maximus     # prints code + URL
 ```
 
 The account must have write access to every repo in `$REPOS` (org member or
@@ -137,14 +139,15 @@ interactive approval prompts for GitHub/network access.
 
 ## Config
 
-`/etc/claudius-<user>.env` — one per instance, named after the unix user the
-instance runs as, so `/etc/claudius-claudebot.env` (chmod 640, owned by
-`claudebot`):
+`/etc/<user>.env` — one per instance, named after the unix user the instance
+runs as, so `/etc/claudius-maximus.env` (chmod 640, owned by `claudius-maximus`).
+`add-instance.sh` sets `LABEL` and `INSTANCE` from that same name; you should
+not invent a separate queue name.
 
 ```bash
-REPOS=foro-sh/platform=/home/claudebot/repos/platform,foro-sh/foro=/home/claudebot/repos/foro=danielsteman|thijssdaniels
+REPOS=foro-sh/platform=/home/claudius-maximus/repos/platform,foro-sh/foro=/home/claudius-maximus/repos/foro=danielsteman|thijssdaniels
 GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx  # the OAuth App the device flow authorizes against
-LABEL=claudius-maximus           # optional; the queue this instance owns
+LABEL=claudius-maximus           # optional; defaults to claudius-maximus
 INSTANCE=Claudius Maximus        # optional; name in logs + Mattermost
 PLAN_MODEL=claude-opus-5         # optional; worker's plan step
 PLAN_EFFORT=high                 # optional; low|medium|high|xhigh|max
@@ -171,10 +174,13 @@ The `GIT_*` identity lives here rather than in the unit because it differs per
 instance — each instance commits as its own account holder. Quote values
 containing spaces; unquoted, systemd drops everything after the space.
 
-`REPOS` is a comma-separated list of `owner/name=/abs/path/to/clone` entries,
-each with an optional `=author|author` allowlist — **no spaces**, and the path
-must be absolute. A malformed entry aborts the worker at startup rather than
-silently auditing the wrong tree. Sweep order follows list order.
+`REPOS` is a comma-separated list of
+`owner/name[=/abs/path/to/clone][=author|author]` entries — **no spaces**. When
+the path is omitted, `add-instance.sh` expands it to
+`/home/<instance>/repos/<owner>/<name>` and writes the absolute form into the env file
+(the worker still requires absolute paths). A malformed entry aborts the worker
+at startup rather than silently auditing the wrong tree. Sweep order follows
+list order.
 
 Locally running Mattermost on the same box: use its
 `http://localhost:8065/hooks/...` incoming-webhook URL.
@@ -188,8 +194,8 @@ token, and the clones.
 ```bash
 cp claudius@.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now claudius@claudebot
-journalctl -u claudius@claudebot -f
+systemctl enable --now claudius@claudius-maximus
+journalctl -u claudius@claudius-maximus -f
 ```
 
 On start, the instance posts ":crown: awake" to Mattermost (listing the repos it
@@ -214,10 +220,13 @@ runs as many as you have subscriptions for.
 **The instance boundary is a unix user.** Not an env var: `$HOME` is what scopes
 the Claude subscription OAuth credentials *and* the keyring the GitHub token
 lands in, so N subscriptions means N homes. Nothing supervises them from inside
-the binary — one process serves one subscription, and systemd runs the set. The
-template unit takes the user as its instance name, so `claudius@claudebot`,
-`claudius@claudebot2`, `claudius@claudebot3` are three independent units of the
-same shape.
+the binary — one process serves one subscription, and systemd runs the set.
+`add-instance.sh` picks the unix user from a fixed Latin-ordinal list
+(`claudius-maximus`, `claudius-secundus`, … `claudius-centesimus`, cap 100) and
+uses that same string as `$LABEL` and — title-cased — as `$INSTANCE`, so you
+never invent or align three names by hand. The template unit takes that user as
+its instance name: `claudius@claudius-maximus`, `claudius@claudius-secundus`,
+`claudius@claudius-tertius`.
 
 **Labels are the partition, and they must not overlap.** Point two workers at the
 same label and both would plan the same issue, then both would implement it and
@@ -230,8 +239,8 @@ with `CLAUDIUS_CLAIM_DIR` (any directory every instance on the box can write). I
 is a same-box guard only: two workers on different machines still need disjoint
 labels, which is the config discipline below. Each instance owns its own label
 triad exclusively — `$LABEL` plus the `:planned` and `:done` state labels the
-worker derives from it, so setting `LABEL=claudius-tertius` is what makes it read
-and write `claudius-tertius:planned` / `:done`.
+worker derives from it, so the third instance reads and writes
+`claudius-tertius:planned` / `:done`.
 
 An instance also only looks at the repos in **its own** `$REPOS`. The lists need
 not match, and usually shouldn't all be the same.
@@ -244,24 +253,33 @@ its own device-flow login for GitHub.
 
 `add-instance.sh` does the mechanical half — the unix user, its clones, its env
 file, the unit — and prints the rest. Run it as root from a checkout, once per
-subscription:
+subscription. With no name argument it takes the next free slot from the ordinal
+list; pass a known name explicitly only to re-run / repair that slot.
 
 ```bash
 cargo build --release
-sudo env REPOS=foro-sh/platform=/home/claudebot3/repos/platform \
+sudo env REPOS=foro-sh/platform \
          GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx \
          GIT_AUTHOR_NAME="Person 3" \
          GIT_AUTHOR_EMAIL=<verified-email-on-person-3s-github-account> \
          CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=http://localhost:8065/hooks/xxxx \
-    ./add-instance.sh claudebot3 claudius-tertius "Claudius Tertius"
+    ./add-instance.sh
+# → provisions claudius-maximus, then claudius-secundus, …
+#    (or pass e.g. claudius-tertius to re-run that slot)
 ```
+
+`REPOS` may be just `owner/name` (clone lands at
+`/home/<instance>/repos/<owner>/<name>`), `owner/name=alice|bob` (same, with an author
+allowlist), or the full `owner/name=/abs/path[=authors]` form. Absolute paths
+must stay under the instance's own `$HOME`.
 
 It validates the config before it creates anything: a `$REPOS` typo, a relative
 clone path, a label another instance's env file already claims, or a clone path
 outside the new user's `$HOME` all abort with nothing written. That last one is
 not a style rule — two workers sharing a working tree both check out branches and
-hard-reset onto origin's default, and one tree corrupts the other. Re-running is
-safe; an existing user, clone or env file is left alone.
+hard-reset onto origin's default, and one tree corrupts the other. Re-running a
+named slot is safe; an existing user, clone or env file is left alone. A plain
+re-run with no args provisions the *next* free name.
 
 `PLAN_MODEL`, `PLAN_EFFORT`, `IMPLEMENT_MODEL`, `IMPLEMENT_EFFORT`,
 `POLL_INTERVAL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` are passed
@@ -279,7 +297,7 @@ automated:
 2. **The subscription login**, as the person who holds it:
 
    ```bash
-   sudo -u claudebot3 -H bash -l
+   sudo -u claudius-tertius -H bash -l
      npm install -g @anthropic-ai/claude-code   # or a per-user install under ~/.local
      claude login && claude doctor              # person 3's own subscription
      unset ANTHROPIC_API_KEY
@@ -293,8 +311,8 @@ automated:
 Then start it:
 
 ```bash
-systemctl enable --now claudius@claudebot3
-journalctl -u claudius@claudebot3 -f
+systemctl enable --now claudius@claudius-tertius
+journalctl -u claudius@claudius-tertius -f
 ```
 
 ### What has to line up
