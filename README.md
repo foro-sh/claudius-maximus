@@ -32,7 +32,7 @@ describes the binary that issue specifies.
 | Opened by an author outside the repo's allowlist | Skipped outright, before planning — see "Who may file an issue CM acts on"                               |
 | Blocked by an open issue (GitHub relationship)  | Skipped until every blocker closes                                                                        |
 | Labeled `claudius-maximus`, not yet `:planned`  | Claude posts an implementation plan, adds `claudius-maximus:planned`                                      |
-| `:planned`                                      | Claude implements on `claude/issue-N`, opens a PR (`Closes #N`), adds `:done`, removes the trigger label |
+| `:planned`                                      | Claude implements and commits on `claude/issue-N`; the worker pushes it and opens the PR (`Closes #N`), adds `:done`, removes the trigger label |
 | `claudius-maximus:done`                         | ignored                                                                                                   |
 
 Quota exhaustion is handled by Claude (`CLAUDE_CODE_RETRY_WATCHDOG=1`): it waits
@@ -122,8 +122,9 @@ set -a; . /etc/claudius-claudebot.env; set +a
 ```
 
 The account must have write access to every repo in `$REPOS` (org member or
-collaborator, `read:org` for org repos) — it pushes `claude/*` branches and
-opens PRs.
+collaborator, `read:org` for org repos): the worker pushes `claude/*` branches
+with this token and opens the PRs as this account. Claude itself never pushes —
+there are no git credentials in the clone for it to use, and no `gh` on the box.
 
 The three labels (`$LABEL`, `:planned`, `:done`) must exist in every repo the
 instance serves. Create them from GitHub's web UI or with `gh` from your own
@@ -142,6 +143,7 @@ instance runs as, so `/etc/claudius-claudebot.env` (chmod 640, owned by
 
 ```bash
 REPOS=foro-sh/platform=/home/claudebot/repos/platform,foro-sh/foro=/home/claudebot/repos/foro=danielsteman|thijssdaniels
+GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx  # the OAuth App the device flow authorizes against
 LABEL=claudius-maximus           # optional; the queue this instance owns
 INSTANCE=Claudius Maximus        # optional; name in logs + Mattermost
 PLAN_MODEL=claude-opus-5         # optional; worker's plan step
@@ -158,8 +160,12 @@ GIT_COMMITTER_NAME="Daniel Steman"
 GIT_COMMITTER_EMAIL=daniel-steman@live.nl
 ```
 
-Same env-var surface as the bash worker — migrating an instance's env file needs
-no edits. No GitHub token here: that lives in the keyring.
+Same env-var surface as the bash worker, plus `GITHUB_CLIENT_ID` — the bash
+worker leaned on `gh`'s own OAuth app, this one has no `gh` to borrow from. It is
+a client id, not a secret: device flow has no client secret, and every instance
+shares the one app (the device flow is what makes each a different *account*).
+Create it once under Settings → Developer settings → OAuth Apps with "Enable
+Device Flow" ticked. No GitHub token here: that lives in the keyring.
 
 The `GIT_*` identity lives here rather than in the unit because it differs per
 instance — each instance commits as its own account holder. Quote values
@@ -243,6 +249,7 @@ subscription:
 ```bash
 cargo build --release
 sudo env REPOS=foro-sh/platform=/home/claudebot3/repos/platform \
+         GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx \
          GIT_AUTHOR_NAME="Person 3" \
          GIT_AUTHOR_EMAIL=<verified-email-on-person-3s-github-account> \
          CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=http://localhost:8065/hooks/xxxx \
@@ -296,8 +303,8 @@ journalctl -u claudius@claudebot3 -f
   `add-instance.sh` refuses a label another `/etc/claudius-*.env` already claims,
   and the worker's startup lock catches the rest.
 - **Each instance's GitHub account needs write access** to every repo in its
-  `REPOS` (org member or collaborator) — it pushes `claude/*` branches and opens
-  PRs.
+  `REPOS` (org member or collaborator) — the worker pushes `claude/*` branches
+  and opens PRs with that account's token.
 - **All three of its labels must exist** in every repo it serves, before it runs.
 - **No two instances share a clone.** One working tree per instance per repo,
   under that instance's own `$HOME`.
@@ -325,8 +332,8 @@ cargo test --workspace
 
 The convention is faking the external boundary rather than mocking internals: the
 GitHub and git surfaces are traits (`cm_github::GithubClient`, `cm_git::GitOps`)
-the state machine is driven through with fakes, and `claude` is stubbed on
-`PATH`, so the suite exercises the real state machine without touching GitHub or
+the state machine is driven through with fakes, and so is the `claude` CLI
+(`cm_worker::claude_cli::Claude`), so the suite exercises the real state machine without touching GitHub or
 spending subscription quota. CI runs `cargo fmt --check`, `cargo clippy
 --workspace --all-targets -- -D warnings`, `cargo build --workspace` and
 `cargo test --workspace` on every PR.
@@ -345,16 +352,18 @@ Every repo in `$REPOS` needs all of these:
   can't become a Claude prompt.
 - A clone on the box at the path given in `$REPOS`, with `main` checked out and
   an `origin` the bot can fetch. **Per instance** — two workers must never share
-  a working tree.
+  a working tree. `add-instance.sh` clones over anonymous HTTPS, so a **private**
+  repo has to be cloned by hand as that unix user, with credentials of your
+  choosing — the worker's own token only arrives later, at the device flow, and
+  is used for pushing, not fetching.
 
 ## Known ceilings
 
-- **libgit2 never fires git hooks.** Commits the worker makes go through `git2`,
-  which — unlike the `git` binary — runs no `commit-msg` hook, so the repo's
-  commitlint hook never sees them. The commit step therefore validates the
-  message against Conventional Commits itself and fails loudly on a bad one;
-  that check is the only thing standing between the worker and a
-  non-conforming commit.
+- **Nothing enforces Conventional Commits locally.** Claude makes the commits
+  with the repo's own `git`, so a `commit-msg` hook fires if the repo has one —
+  but the prompt is the only thing that asks for a conforming message, and the
+  target repo's commitlint CI job is what actually catches a bad one, after the
+  PR is open.
 - **Serial within an instance, one issue per sweep.** Extra repos are visited in
   order within a sweep, so a large first repo delays the ones after it — reorder
   `$REPOS` to change priority. Concurrency *inside* one instance is a non-goal;
