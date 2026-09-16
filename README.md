@@ -109,7 +109,7 @@ chmod +x /home/claudebot/claudius-maximus/claudius-maximus
 **GitHub login is the binary's own job.** On first run it starts GitHub's OAuth
 device flow: it prints a one-time code and a verification URL, you open the URL
 once as the account this instance acts as, and the token is stored in
-`$HOME/.claudius-maximus/github-token` (mode `0600`) — not in
+`$HOME/.claudius-maximus/github-token-<instance>` (mode `0600`) — not in
 `/etc/claudius-<user>.env`. A file rather than the OS keyring because the
 instance is a `nologin` user under systemd, with no login session and no Secret
 Service for a keyring to live in; `$HOME` already holds that instance's Claude
@@ -292,7 +292,7 @@ automated:
 3. **The GitHub device flow.** Run the worker once in the foreground as that user,
    open the printed code and URL as this instance's GitHub account, then Ctrl-C.
    The script prints the exact command; the token lands in
-   `$HOME/.claudius-maximus/github-token`, never in the env file.
+   `$HOME/.claudius-maximus/github-token-<instance>`, never in the env file.
 
 Then start it:
 
@@ -360,7 +360,9 @@ Every repo in `$REPOS` needs all of these:
   repo has to be cloned by hand as that unix user, with credentials of your
   choosing — the worker's own token only arrives later, at the device flow.
   From then on the worker fetches and pushes with that token, so the clone needs
-  no stored credential of its own.
+  no stored credential of its own. **`origin` must be an HTTPS URL**: the token
+  is all the worker offers, and an SSH remote would ask it for a key it does not
+  have.
 
 ## Known ceilings
 

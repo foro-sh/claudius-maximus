@@ -91,7 +91,7 @@ if [[ -e $env_file ]]; then
     echo "$env_file already exists, leaving it alone"
 else
     # No GitHub token here on purpose: the device flow puts it in
-    # $HOME/.claudius-maximus/github-token, mode 0600.
+    # $HOME/.claudius-maximus/github-token-<instance>, mode 0600.
     umask 077
     cat > "$env_file" <<EOF
 REPOS=$REPOS

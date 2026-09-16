@@ -17,6 +17,7 @@
 //! Durable state lives in GitHub labels (no DB), so the worker is stateless
 //! and a reboot loses nothing.
 
+use anyhow::Context;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue};
 
@@ -70,25 +71,6 @@ impl Worker<'_> {
     }
 
     async fn sweep_repo(&self, repo: &RepoEntry) -> anyhow::Result<()> {
-        // The plan step reads the clone to write its plan, so a stale clone
-        // plans against code that moved on. Only the default branch is synced
-        // here: `claude/issue-N` may carry an open PR's commits, and hard-
-        // resetting that onto main would throw them away.
-        //
-        // A failed sync (a network blip, origin down) must not stall the
-        // repo's whole backlog: the implement step syncs main itself from the
-        // prompt, and planning against a slightly stale clone is what
-        // `worker.sh` did on every sweep anyway.
-        //
-        // ponytail: the branch name is hardcoded — every repo the worker
-        // serves is on `main`. Read it off origin's HEAD if that ever changes.
-        if let Err(err) = self.git.sync_branch(&repo.clone_path, "main", self.token) {
-            self.log(&format!(
-                "{}: sync failed, planning against the clone as-is: {err:#}",
-                repo.repo
-            ));
-        }
-
         let issues = self
             .github
             .list_labeled_issues(&repo.repo, &self.config.label)
@@ -149,6 +131,22 @@ impl Worker<'_> {
             ));
             return Ok(());
         }
+        // Before every Claude run, not once per repo: one clone serves the
+        // whole backlog, and an implementing run leaves HEAD on its own
+        // `claude/issue-N` with its commits and its leftovers. The next issue
+        // would branch off that one and open a PR carrying someone else's
+        // work. Only main is synced — `claude/issue-N` may carry an open PR's
+        // commits, and hard-resetting that onto main would throw them away.
+        //
+        // A sync that fails skips this issue rather than running against a
+        // tree of unknown shape. The next sweep retries it.
+        //
+        // ponytail: the branch name is hardcoded — every repo the worker
+        // serves is on `main`. Read it off origin's HEAD if that ever changes.
+        self.git
+            .sync_branch(&repo.clone_path, "main", self.token)
+            .with_context(|| format!("syncing {} before touching #{number}", repo.repo))?;
+
         if labels.iter().any(|l| *l == self.planned_label()) {
             self.implement_issue(repo, issue).await
         } else {
@@ -197,6 +195,9 @@ or run git — output the plan text only.
         self.github
             .add_label(&repo.repo, number, &self.planned_label())
             .await?;
+        // The repo is evidently reachable and this issue plannable, so an
+        // earlier sweep failure on it is no longer the current state.
+        self.notifier.forget(&format!("sweep {} ", repo.repo));
         self.notifier.post(&format!(
             ":scroll: planned {}#{number} — implementing next sweep — {}",
             repo.repo,
@@ -244,6 +245,10 @@ or run git — output the plan text only.
                     .remove_label(&repo.repo, number, &self.config.label)
                     .await?;
                 self.log(&format!("{}#{}: done — {url}", repo.repo, number));
+                // Whatever went wrong here before is history now, so the next
+                // failure on this issue is news again rather than old news.
+                self.notifier
+                    .forget(&format!("implement {}#{number} ", repo.repo));
                 self.notifier.post(&format!(
                     ":white_check_mark: shipped {}#{number} — {url}",
                     repo.repo
@@ -292,10 +297,9 @@ or run git — output the plan text only.
 The issue and the plan already agreed for it are quoted below — they are all
 you get, since this box has no GitHub access of its own. Follow the plan;
 where it turns out to be wrong, say so in the commit messages.
-The clone is already synced with main and you have no credentials to fetch
-with, so work from it as it stands: check out branch {branch} (reuse it if it
-already exists), implement the change, run the test/lint commands from
-CLAUDE.md. Commit in many small,
+The clone was just synced with main and you have no credentials to fetch with,
+so work from it as it stands: check out branch {branch} (reuse it if it already
+exists), implement the change, run the test/lint commands from CLAUDE.md. Commit in many small,
 logically-scoped commits as you go — one per coherent step — rather than a
 single large commit. Each commit must still pass commitlint (Conventional
 Commits). Leave the commits on {branch} and stop there: do NOT push, do NOT
@@ -1198,35 +1202,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_sync_does_not_stall_the_repos_backlog() {
-        struct FailingGit;
-        impl GitOps for FailingGit {
-            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
-                anyhow::bail!("origin unreachable")
+    async fn a_failed_sync_skips_the_issue_but_not_the_other_repos() {
+        // Nothing else re-syncs, so a clone that could not be synced is a tree
+        // of unknown shape: it may still be sitting on another issue's branch.
+        struct SelectivelyFailingGit;
+        impl GitOps for SelectivelyFailingGit {
+            fn sync_branch(
+                &self,
+                clone_path: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<()> {
+                if clone_path.ends_with("platform") {
+                    anyhow::bail!("origin unreachable")
+                }
+                Ok(())
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
-                unreachable!("nothing is implemented in this test, so nothing is pushed")
+                Ok(())
             }
         }
 
         let config = config(
-            vec![repo("foro-sh/foro", "foro", &[])],
+            vec![
+                repo("foro-sh/platform", "platform", &[]),
+                repo("foro-sh/foro", "foro", &[]),
+            ],
             LABEL,
             "Claudius Maximus",
         );
-        let github = FakeGithub::new(vec![FakeIssue::new(
-            "foro-sh/foro",
-            7,
-            "danielsteman",
-            &[LABEL],
-        )]);
+        let github = FakeGithub::new(vec![
+            FakeIssue::new("foro-sh/platform", 101, "danielsteman", &[LABEL]),
+            FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
+        ]);
         let claude = FakeClaude::default();
         let notifier = Notifier::new(None, config.instance.clone());
 
         Worker {
             config: &config,
             github: &github,
-            git: &FailingGit,
+            git: &SelectivelyFailingGit,
             claude: &claude,
             notifier: &notifier,
             token: "fake-token",
@@ -1234,18 +1249,27 @@ mod tests {
         .sweep()
         .await;
 
-        assert_eq!(github.comments().len(), 1, "the issue is still planned");
+        let planned: Vec<u64> = github.comments().iter().map(|(_, n, _)| *n).collect();
+        assert_eq!(planned, vec![7], "only the repo that synced is planned");
+        assert_eq!(
+            github.labels("foro-sh/platform", 101),
+            vec![LABEL.to_string()],
+            "the skipped issue keeps the trigger label, so the next sweep retries it"
+        );
     }
 
     #[tokio::test]
-    async fn syncs_each_clone_before_reading_it() {
+    async fn syncs_the_clone_before_every_issue_not_once_per_repo() {
         let harness = Harness::new(
             config(
                 vec![repo("foro-sh/foro", "foro", &[])],
                 LABEL,
                 "Claudius Maximus",
             ),
-            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            vec![
+                FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
+                FakeIssue::new("foro-sh/foro", 8, "danielsteman", &[LABEL]),
+            ],
             FakeClaude::default(),
         );
 
@@ -1253,7 +1277,12 @@ mod tests {
 
         assert_eq!(
             harness.git.calls(),
-            vec!["sync_branch path=/clones/foro branch=main".to_string()]
+            vec![
+                "sync_branch path=/clones/foro branch=main".to_string(),
+                "sync_branch path=/clones/foro branch=main".to_string(),
+            ],
+            "an implementing run leaves HEAD on its own branch, so the next \
+             issue is synced again rather than branching off it"
         );
     }
 }

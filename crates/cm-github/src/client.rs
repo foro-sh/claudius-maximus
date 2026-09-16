@@ -45,7 +45,7 @@ impl OctocrabGithubClient {
         Self::login_or_load_with(
             instance_name,
             client_id,
-            &FileStore::in_home()?,
+            &FileStore::in_home(instance_name)?,
             GITHUB_API,
             GITHUB_WEB,
         )

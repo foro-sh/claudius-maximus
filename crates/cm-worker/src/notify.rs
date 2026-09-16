@@ -35,9 +35,27 @@ impl Notifier {
     /// issues hit it, while the same issue failing later for a different
     /// reason is a different key, and gets said.
     pub fn post_once(&self, key: &str, text: &str) {
-        if self.said.lock().unwrap().insert(key.to_owned()) {
+        let mut said = self.said.lock().unwrap();
+        // A failure whose message varies every sweep — a stderr dump, an error
+        // carrying a request id — would otherwise grow this set forever in a
+        // process built to run for weeks. Forgetting everything at the cap
+        // costs at most one repeated line per failure still outstanding.
+        if said.len() >= 512 {
+            said.clear();
+        }
+        if said.insert(key.to_owned()) {
+            drop(said);
             self.post(text);
         }
+    }
+
+    /// Forgets every key starting with `prefix`, so a failure that recurs
+    /// after things worked again is heard rather than swallowed as old news.
+    pub fn forget(&self, prefix: &str) {
+        self.said
+            .lock()
+            .unwrap()
+            .retain(|key| !key.starts_with(prefix));
     }
 
     /// Posts to Mattermost if configured. Never fails the worker on a bad
