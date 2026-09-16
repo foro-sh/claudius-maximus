@@ -83,7 +83,7 @@ impl Worker<'_> {
         //
         // ponytail: the branch name is hardcoded — every repo the worker
         // serves is on `main`. Read it off origin's HEAD if that ever changes.
-        if let Err(err) = self.git.sync_branch(&repo.clone_path, "main") {
+        if let Err(err) = self.git.sync_branch(&repo.clone_path, "main", self.token) {
             self.log(&format!(
                 "{}: sync failed, planning against the clone as-is: {err:#}",
                 repo.repo
@@ -577,7 +577,7 @@ mod tests {
     async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
         struct UnpushableGit;
         impl GitOps for UnpushableGit {
-            fn sync_branch(&self, _: &std::path::Path, _: &str) -> anyhow::Result<()> {
+            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 Ok(())
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
@@ -845,7 +845,7 @@ mod tests {
     async fn a_failed_sync_does_not_stall_the_repos_backlog() {
         struct FailingGit;
         impl GitOps for FailingGit {
-            fn sync_branch(&self, _: &std::path::Path, _: &str) -> anyhow::Result<()> {
+            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 anyhow::bail!("origin unreachable")
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {

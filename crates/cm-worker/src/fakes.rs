@@ -239,7 +239,7 @@ impl FakeGit {
 }
 
 impl GitOps for FakeGit {
-    fn sync_branch(&self, clone_path: &Path, branch: &str) -> anyhow::Result<()> {
+    fn sync_branch(&self, clone_path: &Path, branch: &str, _token: &str) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!(
             "sync_branch path={} branch={branch}",
             clone_path.display()

@@ -17,7 +17,9 @@ pub trait GitOps: Send + Sync {
     /// Fetch `origin` and hard-reset `branch` to `origin/<default branch>`,
     /// creating the local branch if it doesn't exist yet. Equivalent of
     /// `worker.sh`'s `git fetch && git checkout <branch> && git reset --hard`.
-    fn sync_branch(&self, clone_path: &Path, branch: &str) -> anyhow::Result<()>;
+    /// Authenticated with `token`, like [`GitOps::push`]: the repos the worker
+    /// serves are private, so an anonymous fetch never sees them.
+    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> anyhow::Result<()>;
 
     /// Push `branch` to `origin` over HTTPS, authenticated with `token`
     /// (the same OAuth token `cm-github`'s client holds).
@@ -30,26 +32,29 @@ pub trait GitOps: Send + Sync {
 pub struct Git2Ops;
 
 impl GitOps for Git2Ops {
-    fn sync_branch(&self, clone_path: &Path, branch: &str) -> Result<()> {
+    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
         let repo = Repository::open(clone_path)?;
         let mut remote = repo.find_remote("origin")?;
 
         // `default_branch` only answers once the remote is connected, so
-        // connect explicitly rather than letting `fetch` do it implicitly.
-        // ponytail: anonymous fetch — private clones will need the token
-        // threaded through `sync_branch` too once the worker touches one.
-        remote
-            .connect(Direction::Fetch)
-            .context("connecting to origin")?;
-        let default = remote.default_branch().context("reading origin HEAD")?;
-        let default = default
-            .as_str()
-            .context("origin's default branch is not utf-8")?
-            .strip_prefix("refs/heads/")
-            .context("origin's default branch is not a branch ref")?
-            .to_owned();
-        remote.fetch(&[&default], Some(&mut FetchOptions::new()), None)?;
-        remote.disconnect()?;
+        // connect explicitly rather than letting `fetch` do it implicitly. The
+        // connection is dropped before the fetch, which opens its own.
+        let default = {
+            let connection = remote
+                .connect_auth(Direction::Fetch, Some(credentials(token)), None)
+                .context("connecting to origin")?;
+            let default = connection.default_branch().context("reading origin HEAD")?;
+            default
+                .as_str()
+                .context("origin's default branch is not utf-8")?
+                .strip_prefix("refs/heads/")
+                .context("origin's default branch is not a branch ref")?
+                .to_owned()
+        };
+
+        let mut fetch_options = FetchOptions::new();
+        fetch_options.remote_callbacks(credentials(token));
+        remote.fetch(&[&default], Some(&mut fetch_options), None)?;
 
         let upstream = repo
             .find_branch(&format!("origin/{default}"), BranchType::Remote)?
@@ -84,12 +89,8 @@ impl GitOps for Git2Ops {
         let repo = Repository::open(clone_path)?;
         let mut remote = repo.find_remote("origin")?;
 
-        let mut callbacks = RemoteCallbacks::new();
-        // GitHub takes an OAuth token as the password behind any non-empty
-        // username.
-        callbacks.credentials(|_, _, _| Cred::userpass_plaintext("x-access-token", token));
         let mut options = PushOptions::new();
-        options.remote_callbacks(callbacks);
+        options.remote_callbacks(credentials(token));
 
         remote.push(
             &[format!("refs/heads/{branch}:refs/heads/{branch}")],
@@ -97,6 +98,15 @@ impl GitOps for Git2Ops {
         )?;
         Ok(())
     }
+}
+
+/// Callbacks that answer GitHub's HTTPS auth with the instance's OAuth token,
+/// which it takes as the password behind any non-empty username. A fresh set
+/// per operation: `RemoteCallbacks` is consumed by whatever it is handed to.
+fn credentials(token: &str) -> RemoteCallbacks<'_> {
+    let mut callbacks = RemoteCallbacks::new();
+    callbacks.credentials(move |_, _, _| Cred::userpass_plaintext("x-access-token", token));
+    callbacks
 }
 
 #[cfg(test)]
@@ -107,6 +117,9 @@ mod tests {
 
     use git2::{IndexAddOption, RepositoryInitOptions, Signature};
     use tempfile::TempDir;
+
+    /// The fixture remote is a local path, which never asks for credentials.
+    const TOKEN: &str = "unused-by-a-local-remote";
 
     fn commit_all(repo: &Repository, message: &str) {
         let mut index = repo.index().unwrap();
@@ -155,7 +168,7 @@ mod tests {
     fn sync_branch_creates_branch_off_the_detected_default() {
         // Deliberately not `main`: the default branch has to be detected.
         let (_tmp, clone) = fixture("trunk");
-        Git2Ops.sync_branch(&clone, "cm/issue-1").unwrap();
+        Git2Ops.sync_branch(&clone, "cm/issue-1", TOKEN).unwrap();
 
         let repo = Repository::open(&clone).unwrap();
         assert_eq!(repo.head().unwrap().shorthand(), Some("cm/issue-1"));
@@ -173,7 +186,7 @@ mod tests {
     #[test]
     fn sync_branch_reuses_the_branch_and_throws_away_local_work() {
         let (_tmp, clone) = fixture("main");
-        Git2Ops.sync_branch(&clone, "cm/issue-2").unwrap();
+        Git2Ops.sync_branch(&clone, "cm/issue-2", TOKEN).unwrap();
 
         fs::write(clone.join("README.md"), "scribbled over\n").unwrap();
         fs::write(clone.join("junk.txt"), "tracked junk\n").unwrap();
@@ -181,7 +194,7 @@ mod tests {
         fs::create_dir_all(clone.join("leftovers")).unwrap();
         fs::write(clone.join("leftovers/scratch.txt"), "never staged\n").unwrap();
 
-        Git2Ops.sync_branch(&clone, "cm/issue-2").unwrap();
+        Git2Ops.sync_branch(&clone, "cm/issue-2", TOKEN).unwrap();
 
         let repo = Repository::open(&clone).unwrap();
         assert_eq!(repo.head().unwrap().shorthand(), Some("cm/issue-2"));
@@ -208,7 +221,7 @@ mod tests {
         drop(repo);
 
         let branch = format!("cm/push-test-{}", std::process::id());
-        Git2Ops.sync_branch(&clone, &branch).unwrap();
+        Git2Ops.sync_branch(&clone, &branch, &token).unwrap();
         fs::write(clone.join("push-test.txt"), "hello\n").unwrap();
         commit_all(&Repository::open(&clone).unwrap(), "test: push smoke test");
         Git2Ops.push(&clone, &branch, &token).unwrap();
