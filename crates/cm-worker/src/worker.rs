@@ -25,6 +25,13 @@ use crate::claude_cli::Claude;
 use crate::config::{Config, RepoEntry};
 use crate::notify::Notifier;
 
+/// What a sweep decided one issue needs, before any clone is touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Plan,
+    Implement,
+}
+
 pub struct Worker<'a> {
     pub config: &'a Config,
     pub github: &'a dyn GithubClient,
@@ -96,42 +103,72 @@ impl Worker<'_> {
                 ));
                 continue;
             }
+            // What to do with it — and whether there is anything to do at all
+            // — is decided before the clone is touched: most of a backlog is
+            // usually blocked or done, and syncing for those costs two TLS
+            // handshakes and a full checkout to accomplish nothing.
+            let action = match self.action_for(repo, &issue).await {
+                Ok(Some(action)) => action,
+                Ok(None) => continue,
+                Err(err) => {
+                    self.report_issue_failure(repo, issue.number, &err);
+                    continue;
+                }
+            };
+
             // A clone that cannot be synced is a tree of unknown shape — it
-            // may still be sitting on the last issue's branch — and the next
-            // issue in this repo would fail the same way. Abandon the repo for
-            // this sweep rather than spending a connect timeout per issue.
+            // may still be sitting on the last issue's branch — and every
+            // other issue in this repo would fail the same way. Abandon the
+            // repo for this sweep rather than spending a connect timeout per
+            // issue in it.
+            //
+            // ponytail: the branch name is hardcoded here and in `ship`'s PR
+            // base — every repo the worker serves is on `main`. Read it off
+            // origin's HEAD if that ever stops being true.
             self.git
                 .sync_branch(&repo.clone_path, "main", self.token)
                 .with_context(|| format!("syncing {}", repo.repo))?;
 
-            if let Err(err) = self.process_issue(repo, &issue).await {
+            if let Err(err) = self.act(repo, &issue, action).await {
                 // Everything that fails inside `implement_issue` is reported
                 // there; what reaches here is a failure to plan, or to read
                 // the issue's own state. Both re-run every sweep, so neither
                 // should be visible only to whoever tails the journal.
-                self.log(&format!(
-                    "{}#{}: sweep error (continuing): {err:#}",
-                    repo.repo, issue.number
-                ));
-                self.notifier.post_once(
-                    &issue_failure_key(&repo.repo, issue.number),
-                    &format!(
-                        ":warning: {}#{} could not be processed — will retry — {}",
-                        repo.repo,
-                        issue.number,
-                        issue_url(&repo.repo, issue.number)
-                    ),
-                );
+                self.report_issue_failure(repo, issue.number, &err);
             }
         }
+        // The repo evidently answers and its clone syncs, so an earlier
+        // repo-wide warning is no longer the current state — said again next
+        // time it happens, which a drained or wholly-blocked backlog would
+        // otherwise never allow.
+        self.notifier.forget(&repo_failure_key(&repo.repo));
         Ok(())
     }
 
-    async fn process_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
+    /// Everything that fails around one issue is said once per issue, and said
+    /// again after the next success there.
+    fn report_issue_failure(&self, repo: &RepoEntry, number: u64, err: &anyhow::Error) {
+        self.log(&format!(
+            "{}#{number}: sweep error (continuing): {err:#}",
+            repo.repo
+        ));
+        self.notifier.post_once(
+            &issue_failure_key(&repo.repo, number),
+            &format!(
+                ":warning: {}#{number} could not be processed — will retry — {}",
+                repo.repo,
+                issue_url(&repo.repo, number)
+            ),
+        );
+    }
+
+    /// What this issue needs next, or `None` if it needs nothing: it is done,
+    /// or it is waiting on a blocker.
+    async fn action_for(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<Option<Action>> {
         let number = issue.number;
         let labels = self.github.issue_labels(&repo.repo, number).await?;
         if labels.iter().any(|l| *l == self.done_label()) {
-            return Ok(());
+            return Ok(None);
         }
         // ponytail: no DAG/topo sort — the serial sweep re-checks every issue,
         // so skipping blocked ones until their blockers close IS the dependency
@@ -145,12 +182,19 @@ impl Worker<'_> {
                 "{}#{}: blocked by open issue(s), skipping",
                 repo.repo, number
             ));
-            return Ok(());
+            return Ok(None);
         }
-        if labels.iter().any(|l| *l == self.planned_label()) {
-            self.implement_issue(repo, issue).await
+        Ok(Some(if labels.iter().any(|l| *l == self.planned_label()) {
+            Action::Implement
         } else {
-            self.plan_issue(repo, issue).await
+            Action::Plan
+        }))
+    }
+
+    async fn act(&self, repo: &RepoEntry, issue: &Issue, action: Action) -> anyhow::Result<()> {
+        match action {
+            Action::Plan => self.plan_issue(repo, issue).await,
+            Action::Implement => self.implement_issue(repo, issue).await,
         }
     }
 
@@ -158,9 +202,9 @@ impl Worker<'_> {
     async fn plan_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
         let number = issue.number;
         self.log(&format!("{}#{}: planning", repo.repo, number));
-        // Headless workers need the same permissive mode here as for
-        // implementation so they can read issues, query the repo, and fetch
-        // context without being stuck on interactive approval prompts.
+        // The planning run is told to touch nothing, so the permissive mode is
+        // only about not being stuck on an interactive approval prompt on a box
+        // with nobody at the keyboard.
         let plan = self.claude.run(
             &repo.clone_path,
             &self.config.plan_model,
@@ -378,14 +422,16 @@ worker's job, and the box has no credentials for you to do it with.
     /// editor, where the marker is visible and easy to drop.
     fn is_our_plan(&self, comment: &str) -> bool {
         let marker = self.plan_marker();
+        let footer = self.plan_footer();
         let mut lines = comment.lines().map(str::trim);
         if lines.clone().any(|line| line == marker) {
             return true;
         }
+        // No marker at all: a plan an operator rewrote in GitHub's editor,
+        // where the marker is visible and easy to drop. The footer names this
+        // instance, so another queue's plan still is not ours.
         !lines.any(|line| line.starts_with(MARKER_PREFIX))
-            && comment
-                .lines()
-                .any(|line| line.trim().starts_with(":crown: Plan by "))
+            && comment.lines().any(|line| line.trim() == footer)
     }
 
     /// Ends every plan comment, so the implementing sweep can find the plan
@@ -830,6 +876,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_marker_less_plan_naming_another_instance_is_not_ours() {
+        // The footer is what identifies a plan whose marker an operator dropped
+        // while editing, so it has to name this instance.
+        let theirs = "## Plan\ndo the other thing\n\n---\n\
+                      :crown: Plan by Claudius Secundus. Implementing next sweep.";
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new(
+                    "foro-sh/foro",
+                    7,
+                    "danielsteman",
+                    &[LABEL, &format!("{LABEL}:planned")],
+                )
+                .with_comment(theirs),
+            ],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        assert!(harness.claude.runs().is_empty(), "claude is never invoked");
+        assert_eq!(
+            harness.github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn a_plan_keeps_hyphens_that_merely_end_its_last_line() {
         let plan = format!(
             "## Plan\nsee docs/adr-001---draft\n\n---\n\
@@ -1097,6 +1176,10 @@ mod tests {
             harness.claude.runs().is_empty(),
             "a blocked issue is never planned"
         );
+        assert!(
+            harness.git.calls().is_empty(),
+            "nor is the clone touched for it: most of a backlog is blocked"
+        );
         assert!(harness.github.comments().is_empty());
         assert_eq!(
             harness.github.labels("foro-sh/foro", 1),
@@ -1133,6 +1216,7 @@ mod tests {
                 .any(|c| c.starts_with("blocked_by")),
             ":done short-circuits before any further API call"
         );
+        assert!(harness.git.calls().is_empty(), "and before any git work");
     }
 
     #[tokio::test]
