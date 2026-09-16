@@ -23,15 +23,19 @@ impl Notifier {
         }
     }
 
-    /// Posts a line the first time it comes up, and never again.
+    /// Posts a line the first time `key` comes up, and never again.
     ///
     /// Failures repeat: the sweep re-runs every `$POLL_INTERVAL`, and a
-    /// backlog that is failing because the subscription's quota is gone fails
-    /// on every issue in it. Posting each of those once says the same thing as
-    /// posting them a thousand times a day, and stays readable. A restart
-    /// clears the memory, which is the right moment to hear it again.
-    pub fn post_once(&self, text: &str) {
-        if self.said.lock().unwrap().insert(text.to_owned()) {
+    /// backlog failing because the subscription's quota is gone fails on every
+    /// issue in it. Posting each of those once says the same thing as posting
+    /// them a thousand times a day, and stays readable.
+    ///
+    /// `key` is separate from the text so it can carry the error the text
+    /// does not: one repo-wide outage collapses to one line however many
+    /// issues hit it, while the same issue failing later for a different
+    /// reason is a different key, and gets said.
+    pub fn post_once(&self, key: &str, text: &str) {
+        if self.said.lock().unwrap().insert(key.to_owned()) {
             self.post(text);
         }
     }

@@ -389,8 +389,10 @@ Every repo in `$REPOS` needs all of these:
   itself, since the box has no GitHub access of its own. Editing the plan
   comment before the next sweep is the one way to steer the implementation;
   only comments the instance's own GitHub account wrote are read, so nobody
-  else can post a plan for it to follow. Delete the comment and the issue is
-  simply planned again. There is currently no way to plan an issue without
+  else can post a plan for it to follow. Leave the `:crown: Plan by …` line (or
+  the HTML marker under it) in place when you edit — one of the two is how the
+  next sweep finds the plan again. Delete the comment and the issue is simply
+  planned again. There is currently no way to plan an issue without
   also implementing it.
 - **`--dangerously-skip-permissions`** during implement — acceptable on an
   isolated, unprivileged box; tighten with a `settings.json` allowlist otherwise.

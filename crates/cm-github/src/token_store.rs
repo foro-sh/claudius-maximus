@@ -112,15 +112,19 @@ impl TokenStore for FileStore {
 }
 
 /// Refuses a path that is a symlink. A path that does not exist yet is fine —
-/// it is the redirect we are looking for, not the absence.
+/// it is the redirect we are looking for, not the absence. Any other stat
+/// error is propagated rather than read as "not a symlink": a path we cannot
+/// look at is not a path we should write through.
 fn refuse_symlink(path: &Path) -> anyhow::Result<()> {
-    if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink()) {
-        anyhow::bail!(
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_symlink() => anyhow::bail!(
             "{} is a symlink — refusing to write through it",
             path.display()
-        );
+        ),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("looking at {}", path.display())),
     }
-    Ok(())
 }
 
 #[cfg(test)]

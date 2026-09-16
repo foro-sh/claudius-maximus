@@ -112,12 +112,18 @@ impl Worker<'_> {
                     "{}#{}: sweep error (continuing): {err:#}",
                     repo.repo, issue.number
                 ));
-                self.notifier.post_once(&format!(
-                    ":warning: {}#{} could not be processed — will retry — {}",
-                    repo.repo,
-                    issue.number,
-                    issue_url(&repo.repo, issue.number)
-                ));
+                self.notifier.post_once(
+                    // Keyed on the repo and the error rather than the issue:
+                    // a rate limit or an outage fails every issue in the
+                    // backlog at once, and that is one piece of news.
+                    &format!("sweep {} {err:#}", repo.repo),
+                    &format!(
+                        ":warning: {}#{} could not be processed — will retry — {}",
+                        repo.repo,
+                        issue.number,
+                        issue_url(&repo.repo, issue.number)
+                    ),
+                );
             }
         }
         Ok(())
@@ -248,11 +254,17 @@ or run git — output the plan text only.
                     "{}#{}: implement failed, will retry next sweep: {err:#}",
                     repo.repo, number
                 ));
-                self.notifier.post_once(&format!(
-                    ":warning: {}#{number} implement failed — will retry — {}",
-                    repo.repo,
-                    issue_url(&repo.repo, number)
-                ));
+                self.notifier.post_once(
+                    // The error is in the key so that this issue failing
+                    // later for a different reason is heard: the worker is
+                    // built to run for weeks without restarting.
+                    &format!("implement {}#{number} {err:#}", repo.repo),
+                    &format!(
+                        ":warning: {}#{number} implement failed — will retry — {}",
+                        repo.repo,
+                        issue_url(&repo.repo, number)
+                    ),
+                );
             }
         }
         Ok(())
@@ -280,8 +292,10 @@ or run git — output the plan text only.
 The issue and the plan already agreed for it are quoted below — they are all
 you get, since this box has no GitHub access of its own. Follow the plan;
 where it turns out to be wrong, say so in the commit messages.
-Sync main, work on branch {branch} (reuse it if it already exists), implement
-the change, run the test/lint commands from CLAUDE.md. Commit in many small,
+The clone is already synced with main and you have no credentials to fetch
+with, so work from it as it stands: check out branch {branch} (reuse it if it
+already exists), implement the change, run the test/lint commands from
+CLAUDE.md. Commit in many small,
 logically-scoped commits as you go — one per coherent step — rather than a
 single large commit. Each commit must still pass commitlint (Conventional
 Commits). Leave the commits on {branch} and stop there: do NOT push, do NOT
@@ -327,25 +341,36 @@ worker's job, and the box has no credentials for you to do it with.
     /// one — and whatever a plan comment says goes straight into a
     /// `--dangerously-skip-permissions` run that commits and opens a PR.
     ///
+    /// Either bookkeeping line identifies it. An operator rewriting the plan
+    /// in GitHub's editor sees the HTML marker that the rendered comment hides
+    /// and may well drop it; losing the whole plan over that is a worse answer
+    /// than recognising the line beside it.
+    ///
     /// Everything else in the comment survives, so steering the next sweep by
     /// editing the plan — the documented way to correct one — works wherever
     /// the edit is made.
     async fn plan_comment(&self, repo: &RepoEntry, number: u64) -> anyhow::Result<Option<String>> {
-        let marker = self.plan_marker();
         let mine = self.github.login();
         let comments = self.github.issue_comments(&repo.repo, number).await?;
         Ok(comments
             .iter()
             .rev()
-            .find(|c| c.author.eq_ignore_ascii_case(mine) && c.body.contains(&marker))
+            .find(|c| {
+                c.author.eq_ignore_ascii_case(mine) && c.body.lines().any(is_plan_bookkeeping)
+            })
             .map(|c| {
-                c.body
+                let stripped = c
+                    .body
                     .lines()
                     .filter(|line| !is_plan_bookkeeping(line))
                     .collect::<Vec<_>>()
-                    .join("\n")
+                    .join("\n");
+                stripped
                     .trim_end()
-                    .trim_end_matches("---")
+                    // Only the separator the footer was written under, not a
+                    // horizontal rule the plan itself ends on.
+                    .strip_suffix("---")
+                    .unwrap_or(&stripped)
                     .trim()
                     .to_owned()
             })
@@ -729,6 +754,37 @@ mod tests {
             1,
             "the next sweep plans it again"
         );
+    }
+
+    #[tokio::test]
+    async fn a_rewritten_plan_that_lost_the_html_marker_is_still_followed() {
+        // The marker is invisible in the rendered comment and sits right there
+        // in GitHub's editor, so an operator rewriting a plan will sometimes
+        // drop it. The visible footer beside it identifies the plan too.
+        let rewritten = "## Plan\ndo the thing\n\n---\n\
+                         :crown: Plan by Claudius Maximus. Implementing next sweep.";
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new(
+                    "foro-sh/foro",
+                    7,
+                    "danielsteman",
+                    &[LABEL, &format!("{LABEL}:planned")],
+                )
+                .with_comment(rewritten),
+            ],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        assert_eq!(harness.github.pulls().len(), 1);
+        assert!(harness.claude.prompts()[0].contains("do the thing"));
     }
 
     #[tokio::test]

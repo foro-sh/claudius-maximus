@@ -234,7 +234,8 @@ impl GithubClient for OctocrabGithubClient {
         Ok(self
             .crab
             .all_pages(page)
-            .await?
+            .await
+            .with_context(|| format!("paging the comments on {repo}#{number}"))?
             .into_iter()
             .map(|c| IssueComment {
                 author: c.user.login,
