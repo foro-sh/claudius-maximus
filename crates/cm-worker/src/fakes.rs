@@ -1,12 +1,6 @@
 //! In-crate fakes for the worker's three boundaries: GitHub, git, and the
 //! `claude` CLI. Same spirit as `worker.sh`'s `tests/stubs/` — fake the
 //! boundary, run the real state machine against it.
-//!
-//! They live outside `#[cfg(test)]` because `main` currently wires them in
-//! too: the octocrab and git2 implementations of these traits are landing
-//! separately (foro-sh/claudius-maximus#1).
-
-#![allow(dead_code)] // the binary wires in a subset; the rest is for the tests
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -24,6 +18,7 @@ pub struct FakeIssue {
     pub repo: String,
     pub number: u64,
     pub author: String,
+    pub title: String,
     pub labels: Vec<String>,
     pub blocked: bool,
 }
@@ -34,6 +29,7 @@ impl FakeIssue {
             repo: repo.to_string(),
             number,
             author: author.to_string(),
+            title: format!("issue {number}"),
             labels: labels.iter().map(|l| l.to_string()).collect(),
             blocked: false,
         }
@@ -52,6 +48,9 @@ struct GithubState {
     /// suite's `$CALLS` file.
     calls: Vec<String>,
     comments: Vec<(String, u64, String)>,
+    /// `(repo, head, body)` of every PR opened, so a test can prove exactly
+    /// one was, off the right branch.
+    pulls: Vec<(String, String, String)>,
 }
 
 #[derive(Default)]
@@ -75,6 +74,10 @@ impl FakeGithub {
 
     pub fn comments(&self) -> Vec<(String, u64, String)> {
         self.state.lock().unwrap().comments.clone()
+    }
+
+    pub fn pulls(&self) -> Vec<(String, String, String)> {
+        self.state.lock().unwrap().pulls.clone()
     }
 
     /// The labels an issue carries now, after everything the worker did to it.
@@ -102,6 +105,7 @@ impl GithubClient for FakeGithub {
             .map(|i| Issue {
                 number: i.number,
                 author: i.author.clone(),
+                title: i.title.clone(),
             })
             .collect();
         issues.sort_by_key(|i| i.number);
@@ -159,6 +163,25 @@ impl GithubClient for FakeGithub {
         Ok(())
     }
 
+    async fn create_pull_request(
+        &self,
+        repo: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> anyhow::Result<String> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push(format!(
+            "create_pr repo={repo} head={head} base={base} title={title}"
+        ));
+        let number = state.pulls.len() + 1;
+        state
+            .pulls
+            .push((repo.to_string(), head.to_string(), body.to_string()));
+        Ok(format!("https://github.com/{repo}/pull/{number}"))
+    }
+
     async fn blocked_by_open_issue(&self, repo: &str, number: u64) -> anyhow::Result<bool> {
         let mut state = self.state.lock().unwrap();
         state
@@ -190,20 +213,6 @@ impl GitOps for FakeGit {
             clone_path.display()
         ));
         Ok(())
-    }
-
-    fn commit(
-        &self,
-        clone_path: &Path,
-        message: &str,
-        _author_name: &str,
-        _author_email: &str,
-    ) -> anyhow::Result<Option<String>> {
-        self.calls.lock().unwrap().push(format!(
-            "commit path={} message={message}",
-            clone_path.display()
-        ));
-        Ok(None)
     }
 
     fn push(&self, clone_path: &Path, branch: &str, _token: &str) -> anyhow::Result<()> {
