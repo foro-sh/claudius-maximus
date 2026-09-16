@@ -10,12 +10,14 @@
 //!   `<label>:done`                     -> ignored
 //!
 //! No approval step: applying the label is the only human action required. The
-//! plan comment is posted for visibility on the next sweep's implementation,
-//! not as a gate.
+//! plan comment is not a gate — nobody has to approve it — but it is not
+//! decoration either: the next sweep reads it back out of the issue and hands
+//! it to the implementing run, which is the only place it is kept.
 //!
 //! Durable state lives in GitHub labels (no DB), so the worker is stateless
 //! and a reboot loses nothing.
 
+use anyhow::Context;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue};
 
@@ -135,12 +137,13 @@ impl Worker<'_> {
         if labels.iter().any(|l| *l == self.planned_label()) {
             self.implement_issue(repo, issue).await
         } else {
-            self.plan_issue(repo, number).await
+            self.plan_issue(repo, issue).await
         }
     }
 
     /// Posts an implementation plan, then marks the issue planned.
-    async fn plan_issue(&self, repo: &RepoEntry, number: u64) -> anyhow::Result<()> {
+    async fn plan_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
+        let number = issue.number;
         self.log(&format!("{}#{}: planning", repo.repo, number));
         // Headless workers need the same permissive mode here as for
         // implementation so they can read issues, query the repo, and fetch
@@ -150,11 +153,15 @@ impl Worker<'_> {
             &self.config.plan_model,
             &self.config.plan_effort,
             &format!(
-                "You are triaging GitHub issue #{number} in {}. Read the issue and the relevant
-code in this repo. Produce a concise implementation plan in markdown: the
-approach, the files you'd touch, tests, and risks. Do NOT modify any files or
-run git — output the plan text only.",
-                repo.repo
+                "You are triaging GitHub issue #{number} in {}. The issue is quoted below — it is
+all you get, since this box has no GitHub access of its own. Read it and the
+relevant code in this repo. Produce a concise implementation plan in markdown:
+the approach, the files you'd touch, tests, and risks. Do NOT modify any files
+or run git — output the plan text only.
+
+{}",
+                repo.repo,
+                quote_issue(issue)
             ),
         )?;
         if plan.trim().is_empty() {
@@ -165,10 +172,7 @@ run git — output the plan text only.",
             .comment(
                 &repo.repo,
                 number,
-                &format!(
-                    "{plan}\n\n---\n:crown: Plan by {}. Implementing next sweep.",
-                    self.config.instance
-                ),
+                &format!("{plan}\n\n---\n{}", self.plan_footer()),
             )
             .await?;
         self.github
@@ -186,6 +190,13 @@ run git — output the plan text only.",
         let number = issue.number;
         let branch = branch_for(number);
         self.log(&format!("{}#{}: implementing", repo.repo, number));
+        // The plan was written on an earlier sweep and lives only in the issue
+        // comment it was posted as; without it the implementing run would
+        // re-derive an approach nobody has seen, which is not what
+        // plan-then-implement means. A missing plan means the comment was
+        // deleted while `:planned` stayed on — loud enough to be worth a sweep
+        // error rather than an unplanned implementation.
+        let plan = self.plan_comment(repo, number).await?;
         // ponytail: `--dangerously-skip-permissions` (in `claude_cli`) is the
         // realistic headless mode for a bot on an isolated, unprivileged box.
         // Tighten with a settings.json allowlist if this ever runs somewhere
@@ -196,14 +207,24 @@ run git — output the plan text only.",
             &self.config.implement_effort,
             &format!(
                 "Implement GitHub issue #{number} in {}, following this repo's CLAUDE.md.
+The issue and the plan already agreed for it are quoted below — they are all
+you get, since this box has no GitHub access of its own. Follow the plan;
+where it turns out to be wrong, say so in the commit messages.
 Sync main, work on branch {branch} (reuse it if it already exists), implement
 the change, run the test/lint commands from CLAUDE.md. Commit in many small,
 logically-scoped commits as you go — one per coherent step — rather than a
 single large commit. Each commit must still pass commitlint (Conventional
 Commits). Leave the commits on {branch} and stop there: do NOT push, do NOT
 open a pull request, do NOT merge anything. Pushing and opening the PR is the
-worker's job, and the box has no credentials for you to do it with.",
-                repo.repo
+worker's job, and the box has no credentials for you to do it with.
+
+{}
+
+## The plan
+
+{plan}",
+                repo.repo,
+                quote_issue(issue)
             ),
         );
 
@@ -262,6 +283,41 @@ worker's job, and the box has no credentials for you to do it with.",
             .await
     }
 
+    /// The plan this instance posted, read back out of the issue's comments
+    /// and stripped of the footer that identifies it.
+    async fn plan_comment(&self, repo: &RepoEntry, number: u64) -> anyhow::Result<String> {
+        let footer = self.plan_footer();
+        let comments = self.github.issue_comments(&repo.repo, number).await?;
+        comments
+            .iter()
+            .rev()
+            .find_map(|c| c.trim_end().strip_suffix(&footer))
+            .map(|plan| {
+                plan.trim_end()
+                    .trim_end_matches("---")
+                    .trim_end()
+                    .to_owned()
+            })
+            .with_context(|| {
+                format!(
+                    "{}#{number} is labeled {} but carries no plan comment from {} — \
+                     remove the label to have it planned again",
+                    repo.repo,
+                    self.planned_label(),
+                    self.config.instance
+                )
+            })
+    }
+
+    /// Ends every plan comment, so the implementing sweep can tell this
+    /// instance's plan from any other comment on the issue.
+    fn plan_footer(&self) -> String {
+        format!(
+            ":crown: Plan by {}. Implementing next sweep.",
+            self.config.instance
+        )
+    }
+
     fn planned_label(&self) -> String {
         format!("{}:planned", self.config.label)
     }
@@ -280,6 +336,18 @@ worker's job, and the box has no credentials for you to do it with.",
     fn log(&self, message: &str) {
         println!("{}: {message}", self.config.instance);
     }
+}
+
+/// The issue as Claude gets to see it: the worker reads GitHub, the box it
+/// runs Claude on cannot. Fenced so a body full of markdown headings cannot be
+/// mistaken for the prompt's own structure.
+fn quote_issue(issue: &Issue) -> String {
+    format!(
+        "## The issue\n\n### #{} {}\n\n````\n{}\n````",
+        issue.number,
+        issue.title,
+        issue.body.trim()
+    )
 }
 
 /// One branch per issue, so two instances never collide: an issue belongs to
@@ -310,6 +378,14 @@ mod tests {
     use std::time::Duration;
 
     const LABEL: &str = "claudius-maximus";
+
+    /// What `plan_issue` leaves on an issue, for tests that start from an
+    /// already-planned one.
+    fn plan_comment(instance: &str) -> String {
+        format!(
+            "## Plan\ndo the thing\n\n---\n:crown: Plan by {instance}. Implementing next sweep."
+        )
+    }
 
     fn config(repos: Vec<RepoEntry>, label: &str, instance: &str) -> Config {
         Config {
@@ -410,6 +486,18 @@ mod tests {
         assert!(implement_prompt.contains("Implement GitHub issue #7 in foro-sh/foro"));
         assert!(implement_prompt.contains("branch claude/issue-7"));
         assert!(implement_prompt.contains("do NOT push"));
+        assert!(
+            implement_prompt.contains("the work order for issue 7"),
+            "the issue body is the only description Claude gets: {implement_prompt}"
+        );
+        assert!(
+            implement_prompt.contains("do the thing"),
+            "the plan from the first sweep reaches the implementing run: {implement_prompt}"
+        );
+        assert!(
+            !implement_prompt.contains("Plan by Claudius Maximus"),
+            "the plan's footer is worker bookkeeping, not part of the plan: {implement_prompt}"
+        );
         assert_eq!(
             harness.github.pulls(),
             vec![(
@@ -437,6 +525,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_plan_prompt_quotes_the_issue() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        let prompt = &harness.claude.prompts()[0];
+        assert!(prompt.contains("#7 issue 7"), "{prompt}");
+        assert!(prompt.contains("the work order for issue 7"), "{prompt}");
+    }
+
+    #[tokio::test]
+    async fn a_planned_issue_whose_plan_comment_is_gone_is_not_implemented() {
+        // `:planned` with no plan means someone deleted the comment. Guessing
+        // an approach nobody has seen is worse than failing loudly and being
+        // re-planned once the label is removed.
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new(
+                "foro-sh/foro",
+                7,
+                "danielsteman",
+                &[LABEL, &format!("{LABEL}:planned")],
+            )],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        assert!(harness.claude.runs().is_empty(), "claude is never invoked");
+        assert!(harness.github.pulls().is_empty());
+        assert_eq!(
+            harness.github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string(), format!("{LABEL}:planned")]
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
         struct UnpushableGit;
         impl GitOps for UnpushableGit {
@@ -453,12 +590,15 @@ mod tests {
             LABEL,
             "Claudius Maximus",
         );
-        let github = FakeGithub::new(vec![FakeIssue::new(
-            "foro-sh/foro",
-            7,
-            "danielsteman",
-            &[LABEL, &format!("{LABEL}:planned")],
-        )]);
+        let github = FakeGithub::new(vec![
+            FakeIssue::new(
+                "foro-sh/foro",
+                7,
+                "danielsteman",
+                &[LABEL, &format!("{LABEL}:planned")],
+            )
+            .with_comment(&plan_comment("Claudius Maximus")),
+        ]);
         let notifier = Notifier::new(None, config.instance.clone());
 
         Worker {
@@ -619,7 +759,8 @@ mod tests {
                     102,
                     "danielsteman",
                     &["claudius-secundus", "claudius-secundus:planned"],
-                ),
+                )
+                .with_comment(&plan_comment("Claudius Secundus")),
             ],
             FakeClaude::default(),
         );

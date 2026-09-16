@@ -19,7 +19,9 @@ pub struct FakeIssue {
     pub number: u64,
     pub author: String,
     pub title: String,
+    pub body: String,
     pub labels: Vec<String>,
+    pub comments: Vec<String>,
     pub blocked: bool,
 }
 
@@ -30,13 +32,22 @@ impl FakeIssue {
             number,
             author: author.to_string(),
             title: format!("issue {number}"),
+            body: format!("the work order for issue {number}"),
             labels: labels.iter().map(|l| l.to_string()).collect(),
+            comments: Vec::new(),
             blocked: false,
         }
     }
 
     pub fn blocked(mut self) -> Self {
         self.blocked = true;
+        self
+    }
+
+    /// An issue that was planned on an earlier sweep, carrying the comment
+    /// that sweep left behind.
+    pub fn with_comment(mut self, body: &str) -> Self {
+        self.comments.push(body.to_string());
         self
     }
 }
@@ -106,6 +117,7 @@ impl GithubClient for FakeGithub {
                 number: i.number,
                 author: i.author.clone(),
                 title: i.title.clone(),
+                body: i.body.clone(),
             })
             .collect();
         issues.sort_by_key(|i| i.number);
@@ -160,7 +172,27 @@ impl GithubClient for FakeGithub {
         state
             .comments
             .push((repo.to_string(), number, body.to_string()));
+        if let Some(issue) = state
+            .issues
+            .iter_mut()
+            .find(|i| i.repo == repo && i.number == number)
+        {
+            issue.comments.push(body.to_string());
+        }
         Ok(())
+    }
+
+    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .calls
+            .push(format!("issue_comments repo={repo} num={number}"));
+        Ok(state
+            .issues
+            .iter()
+            .find(|i| i.repo == repo && i.number == number)
+            .map(|i| i.comments.clone())
+            .unwrap_or_default())
     }
 
     async fn create_pull_request(
