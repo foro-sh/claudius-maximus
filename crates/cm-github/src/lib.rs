@@ -25,8 +25,8 @@ pub struct Issue {
 /// This is the entire GitHub surface `worker.sh` used through `gh` today:
 /// list issues carrying a label, read/add/remove labels, comment, and check
 /// the `blocked_by` dependency relationship. A real implementation
-/// authenticates via GitHub's OAuth device flow and stores the token with the
-/// `keyring` crate — see #1, and [`OctocrabGithubClient`].
+/// authenticates via GitHub's OAuth device flow and stores the token in the
+/// instance's home — see #1, and [`OctocrabGithubClient`].
 #[async_trait]
 pub trait GithubClient: Send + Sync {
     /// Open issues carrying `label`, pull requests excluded. A closed issue

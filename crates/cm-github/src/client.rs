@@ -8,7 +8,7 @@ use octocrab::params::State;
 use secrecy::{ExposeSecret, SecretString};
 use std::time::Duration;
 
-use crate::token_store::{KeyringStore, SERVICE, TokenStore};
+use crate::token_store::{FileStore, TokenStore};
 use crate::{GithubClient, Issue};
 
 /// The REST API host, and — separately — the website, which is where the
@@ -44,7 +44,7 @@ impl OctocrabGithubClient {
         Self::login_or_load_with(
             instance_name,
             client_id,
-            &KeyringStore,
+            &FileStore::in_home()?,
             GITHUB_API,
             GITHUB_WEB,
         )
@@ -58,18 +58,19 @@ impl OctocrabGithubClient {
         api_uri: &str,
         web_uri: &str,
     ) -> anyhow::Result<Self> {
-        if let Some(token) = store.load(instance_name)? {
+        if let Some(token) = store.load()? {
             return Self::authenticated(api_uri, token).await?.with_context(|| {
                 format!(
                     "GitHub rejected the token stored for {instance_name:?} — revoked, expired, \
-                     or issued against another OAuth app. Delete the {SERVICE}/{instance_name} \
-                     entry from the keychain and restart to authorize again."
+                     or issued against another OAuth app. Delete {} and restart to authorize \
+                     again.",
+                    store.location()
                 )
             });
         }
 
         let token = device_flow(client_id, web_uri).await?;
-        store.store(instance_name, &token)?;
+        store.store(&token)?;
         Self::authenticated(api_uri, token)
             .await?
             .context("GitHub rejected the token it just issued")
@@ -417,7 +418,7 @@ mod tests {
     /// A client already holding `stored-token`, pointed at the mock server.
     async fn client(server: &MockServer) -> OctocrabGithubClient {
         mock_valid_user(server).await;
-        let store = MemoryStore::with_token(INSTANCE, "stored-token");
+        let store = MemoryStore::with_token("stored-token");
         OctocrabGithubClient::login_or_load_with(
             INSTANCE,
             CLIENT_ID,
@@ -486,7 +487,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(client.token(), "fresh-token");
-        assert_eq!(store.get(INSTANCE).as_deref(), Some("fresh-token"));
+        assert_eq!(store.get().as_deref(), Some("fresh-token"));
     }
 
     #[tokio::test]
@@ -504,7 +505,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let store = MemoryStore::with_token(INSTANCE, "stored-token");
+        let store = MemoryStore::with_token("stored-token");
         let error = OctocrabGithubClient::login_or_load_with(
             INSTANCE,
             CLIENT_ID,
@@ -523,7 +524,7 @@ mod tests {
             "unexpected error: {error:#}"
         );
         // The bad token is left in place; clearing it is the operator's call.
-        assert_eq!(store.get(INSTANCE).as_deref(), Some("stored-token"));
+        assert_eq!(store.get().as_deref(), Some("stored-token"));
     }
 
     #[tokio::test]
@@ -567,7 +568,7 @@ mod tests {
             error.to_string().contains("expired after 0s"),
             "unexpected error: {error:#}"
         );
-        assert_eq!(store.get(INSTANCE), None);
+        assert_eq!(store.get(), None);
     }
 
     #[tokio::test]
@@ -581,7 +582,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let store = MemoryStore::with_token(INSTANCE, "stored-token");
+        let store = MemoryStore::with_token("stored-token");
         let error = OctocrabGithubClient::login_or_load_with(
             INSTANCE,
             CLIENT_ID,
