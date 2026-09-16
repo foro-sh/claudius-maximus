@@ -9,8 +9,9 @@ inbound tunnel. Status updates post to Mattermost if configured.
 
 One **instance** = one subscription = one unix user, run from the
 `claudius@.service` template. Beyond one subscription's rolling window,
-throughput comes from adding an instance, each draining its own label — see
-[Running a second instance](#running-a-second-instance).
+throughput comes from adding instances — any number of them, each draining its
+own label. `add-instance.sh` provisions one; see
+[Adding an instance](#adding-an-instance).
 
 It started as a bash script in `foro-sh/platform` (`infra/claudius-maximus/`)
 and is being ported to Rust here: `octocrab` for the GitHub API over device-flow
@@ -41,7 +42,7 @@ the configured order, drains each one's backlog, then sleeps. Adding a repo
 widens what that one worker looks at — it does **not** start a second Claude
 process, so an instance stays serial on its single subscription. (Adding an
 *instance* is the thing that adds a process; see
-[Running a second instance](#running-a-second-instance).)
+[Adding an instance](#adding-an-instance).)
 
 Each repo needs its own clone and its own copy of the three labels; the state
 machine above then runs per repo, independently. Because issue numbers repeat
@@ -80,9 +81,10 @@ the only thing that has to exist on the server besides the binary is Claude Code
 
 ## One-time server setup (run as `claudebot`)
 
-This is the first instance. Every step here is **per instance** — a second
-subscription repeats all of it as its own unix user, with its own label triad
-([Running a second instance](#running-a-second-instance)).
+This is the first instance, set up by hand. Every step here is **per
+instance** — each further subscription repeats all of it as its own unix user,
+with its own label triad, which is what `add-instance.sh` automates
+([Adding an instance](#adding-an-instance)).
 
 ```bash
 # 1. Claude Code >= 2.1.186 (RETRY_WATCHDOG), subscription login, no API key.
@@ -183,7 +185,7 @@ journalctl -u claudius@claudebot -f
 On start, the instance posts ":crown: awake" to Mattermost (listing the repos it
 will drain), then ":scroll: planned ORG/REPO#N" / ":white_check_mark: shipped
 ORG/REPO#N" / ":warning: ORG/REPO#N failed" per issue — all under its `$INSTANCE`
-name, so two instances in one channel stay tellable apart.
+name, so several instances in one channel stay tellable apart.
 
 Migrating a box that runs the bash worker: stop the unit, `scp` the binary next
 to (or over) `worker.sh`, complete the device-flow login once in the foreground,
@@ -191,17 +193,21 @@ point `ExecStart` at the binary, `systemctl daemon-reload && systemctl restart`.
 The env file, labels, clones and in-flight issue state all carry over unchanged
 — `worker.sh`, `repos.sh` and the `gh` CLI can then go.
 
-## Running a second instance
+## Adding an instance
 
 One subscription's rolling 5h window is the throughput ceiling for a single
-instance — it drains serially, one issue per sweep. A second instance lifts that
-by adding a *second subscription*, held by a second person, on a second GitHub
-account.
+instance — it drains serially, one issue per sweep. Throughput past that comes
+from adding instances: each one is a *separate subscription*, held by a separate
+person, on a separate GitHub account. There is no fixed number of them. The box
+runs as many as you have subscriptions for.
 
 **The instance boundary is a unix user.** Not an env var: `$HOME` is what scopes
 the Claude subscription OAuth credentials *and* the keyring the GitHub token
-lands in, so two subscriptions means two homes. The template unit takes the user
-as its instance name — `claudius@claudebot` and `claudius@claudebot2`.
+lands in, so N subscriptions means N homes. Nothing supervises them from inside
+the binary — one process serves one subscription, and systemd runs the set. The
+template unit takes the user as its instance name, so `claudius@claudebot`,
+`claudius@claudebot2`, `claudius@claudebot3` are three independent units of the
+same shape.
 
 **Labels are the partition, and they must not overlap.** Point two workers at the
 same label and both would plan the same issue, then both would implement it and
@@ -212,84 +218,85 @@ holds it — so the mistake shows up as a failed unit, seconds after `systemctl
 start`, rather than as duplicate PRs. Point the lock somewhere other than `/tmp`
 with `CLAUDIUS_CLAIM_DIR` (any directory every instance on the box can write). It
 is a same-box guard only: two workers on different machines still need disjoint
-labels, which is the config discipline below. Instance 2 gets its own label triad
-and owns it exclusively — `$LABEL` plus the `:planned` and `:done` state labels
-the worker derives from it, so setting `LABEL=claudius-secundus` is what makes it
-read and write `claudius-secundus:planned` / `:done`.
+labels, which is the config discipline below. Each instance owns its own label
+triad exclusively — `$LABEL` plus the `:planned` and `:done` state labels the
+worker derives from it, so setting `LABEL=claudius-tertius` is what makes it read
+and write `claudius-tertius:planned` / `:done`.
 
-An instance also only looks at the repos in **its own** `$REPOS`. The two lists
-need not match.
+An instance also only looks at the repos in **its own** `$REPOS`. The lists need
+not match, and usually shouldn't all be the same.
 
 Each instance must be logged in as the person who actually holds that
 subscription — `claude login` on their own account, not a shared credential, and
 its own device-flow login for GitHub.
 
-### Setup (instance 2 — `claudebot2`, `claudius-secundus`, `foro-sh/platform` only)
+### Setup
+
+`add-instance.sh` does the mechanical half — the unix user, its clones, its env
+file, the unit — and prints the rest. Run it as root from a checkout, once per
+subscription:
 
 ```bash
-# 1. The user, as root. No login shell needed; it only runs the unit.
-useradd -m -s /usr/sbin/nologin claudebot2
-
-# 2. As claudebot2: its own subscription login. It writes into this $HOME,
-#    which is the entire point — nothing here is shared with claudebot.
-sudo -u claudebot2 -H bash -l
-  npm install -g @anthropic-ai/claude-code   # or a per-user install under ~/.local
-  claude login && claude doctor              # person 2's own subscription
-  unset ANTHROPIC_API_KEY
-
-# 3. Its own clone of the one repo it serves — never share a working tree with
-#    instance 1. Both check out branches and hard-reset to origin/main; one tree
-#    would corrupt the other.
-  git clone https://github.com/foro-sh/platform.git /home/claudebot2/repos/platform
-
-# 4. Its own copy of the binary, and its own GitHub device-flow login as
-#    person 2 — run it once in the foreground and open the printed URL.
-  mkdir -p /home/claudebot2/claudius-maximus
-  # ...scp the binary here, then:
-  chmod +x /home/claudebot2/claudius-maximus/claudius-maximus
-  set -a; . /etc/claudius-claudebot2.env; set +a       # written below, first
-  /home/claudebot2/claudius-maximus/claudius-maximus    # prints code + URL
-  exit
-chown -R claudebot2:claudebot2 /home/claudebot2/claudius-maximus
+cargo build --release
+sudo env REPOS=foro-sh/platform=/home/claudebot3/repos/platform \
+         GIT_AUTHOR_NAME="Person 3" \
+         GIT_AUTHOR_EMAIL=<verified-email-on-person-3s-github-account> \
+         CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=http://localhost:8065/hooks/xxxx \
+    ./add-instance.sh claudebot3 claudius-tertius "Claudius Tertius"
 ```
 
-Its label triad (`claudius-secundus`, `claudius-secundus:planned`,
-`claudius-secundus:done`) has to exist in the repo it serves before it runs.
-This is what keeps the queues disjoint — the worker moves the `:planned` and
-`:done` ones itself, but all three must exist first.
+It validates the config before it creates anything: a `$REPOS` typo, a relative
+clone path, a label another instance's env file already claims, or a clone path
+outside the new user's `$HOME` all abort with nothing written. That last one is
+not a style rule — two workers sharing a working tree both check out branches and
+hard-reset onto origin's default, and one tree corrupts the other. Re-running is
+safe; an existing user, clone or env file is left alone.
 
-`/etc/claudius-claudebot2.env` (chmod 640, owned by `claudebot2`):
+`PLAN_MODEL`, `PLAN_EFFORT`, `IMPLEMENT_MODEL`, `IMPLEMENT_EFFORT`,
+`POLL_INTERVAL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` are passed
+through the same way and otherwise take the defaults from [Config](#config).
+`CLAUDIUS_BINARY` overrides where the binary is copied from.
+
+Three things the script deliberately leaves to you, because none of them can be
+automated:
+
+1. **The label triad** (`$LABEL`, `$LABEL:planned`, `$LABEL:done`) must exist in
+   every repo the instance serves, before it runs. The worker moves those labels;
+   it never creates them. Create them from GitHub's web UI or with `gh` from your
+   own workstation.
+
+2. **The subscription login**, as the person who holds it:
+
+   ```bash
+   sudo -u claudebot3 -H bash -l
+     npm install -g @anthropic-ai/claude-code   # or a per-user install under ~/.local
+     claude login && claude doctor              # person 3's own subscription
+     unset ANTHROPIC_API_KEY
+   ```
+
+3. **The GitHub device flow.** Run the worker once in the foreground as that user,
+   open the printed code and URL as this instance's GitHub account, then Ctrl-C.
+   The script prints the exact command; the token lands in that user's keyring,
+   never in the env file.
+
+Then start it:
 
 ```bash
-REPOS=foro-sh/platform=/home/claudebot2/repos/platform
-LABEL=claudius-secundus
-INSTANCE=Claudius Secundus
-PLAN_MODEL=claude-opus-5
-PLAN_EFFORT=high
-IMPLEMENT_MODEL=claude-sonnet-5
-IMPLEMENT_EFFORT=high
-CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=http://localhost:8065/hooks/xxxx
-GIT_AUTHOR_NAME="<person 2>"
-GIT_AUTHOR_EMAIL=<verified-email-on-person-2s-github-account>
-GIT_COMMITTER_NAME="<person 2>"
-GIT_COMMITTER_EMAIL=<verified-email-on-person-2s-github-account>
-```
-
-No author allowlist on that `REPOS` entry: `foro-sh/platform` is private, so
-filing an issue already requires access. Adding a public repo here later would
-need one.
-
-```bash
-systemctl enable --now claudius@claudebot2      # template already installed
-journalctl -u claudius@claudebot2 -f
+systemctl enable --now claudius@claudebot3
+journalctl -u claudius@claudebot3 -f
 ```
 
 ### What has to line up
 
 - **`LABEL` is unique per instance.** The single most important line in the file.
-- **Person 2's GitHub account needs write access** to every repo in its `REPOS`
-  (org member or collaborator) — it pushes `claude/*` branches and opens PRs.
+  `add-instance.sh` refuses a label another `/etc/claudius-*.env` already claims,
+  and the worker's startup lock catches the rest.
+- **Each instance's GitHub account needs write access** to every repo in its
+  `REPOS` (org member or collaborator) — it pushes `claude/*` branches and opens
+  PRs.
 - **All three of its labels must exist** in every repo it serves, before it runs.
+- **No two instances share a clone.** One working tree per instance per repo,
+  under that instance's own `$HOME`.
 - **Branch names can't collide.** `claude/issue-N` is derived from the issue
   number, and each issue belongs to exactly one queue, so two instances never
   target the same branch.
@@ -297,7 +304,7 @@ journalctl -u claudius@claudebot2 -f
 ### Routing work between the queues
 
 Which label you apply decides which subscription implements the issue. That split
-is deliberately manual — assign labels evenly by hand and the two queues stay
+is deliberately manual — assign labels evenly by hand and the queues stay
 balanced; there is no automatic distribution and none is wanted.
 
 Dependencies work across queues without any special handling: the blocked check
@@ -309,6 +316,7 @@ wait for it.
 
 ```bash
 cargo test --workspace
+./test-add-instance.sh      # add-instance.sh's config validation
 ```
 
 The convention is faking the external boundary rather than mocking internals: the
@@ -346,7 +354,7 @@ Every repo in `$REPOS` needs all of these:
 - **Serial within an instance, one issue per sweep.** Extra repos are visited in
   order within a sweep, so a large first repo delays the ones after it — reorder
   `$REPOS` to change priority. Concurrency *inside* one instance is a non-goal;
-  scale out with a second instance instead.
+  scale out with another instance instead.
 - **Instances coordinate on exactly one thing: the label.** Each worker takes an
   OS lock on `/tmp/claudius-label-<label>.lock` at startup and refuses to run if
   another live worker holds it, so a duplicated `$LABEL` stops at the second unit
