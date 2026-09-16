@@ -49,7 +49,12 @@ impl FileStore {
 impl TokenStore for FileStore {
     fn load(&self) -> anyhow::Result<Option<String>> {
         match fs::read_to_string(&self.path) {
-            Ok(token) => Ok(Some(token.trim().to_owned())),
+            // An empty file is a half-written one — `store` truncates before
+            // it writes, so a kill or a full disk leaves zero bytes behind.
+            // Reading that back as a token would send GitHub an empty bearer,
+            // be refused, and park the worker on "delete the stored token" for
+            // a file that holds nothing. No token is exactly what it is.
+            Ok(token) => Ok(Some(token.trim().to_owned()).filter(|t| !t.is_empty())),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err).with_context(|| format!("reading {}", self.path.display())),
         }
@@ -120,6 +125,16 @@ mod tests {
         let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(Path::new(&store.location())), 0o600);
         assert_eq!(mode(&home.path().join(".claudius-maximus")), 0o700);
+    }
+
+    #[test]
+    fn a_half_written_token_file_reads_as_no_token_at_all() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        store.store("gho_token").unwrap();
+        fs::write(store.location(), "").unwrap();
+
+        assert_eq!(store.load().unwrap(), None);
     }
 
     #[test]
