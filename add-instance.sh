@@ -4,6 +4,7 @@
 # subscription you want draining a queue.
 #
 #   REPOS=foro-sh/platform=/home/claudebot3/repos/platform \
+#   GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx \
 #   GIT_AUTHOR_NAME="Someone" GIT_AUTHOR_EMAIL=someone@example.com \
 #   ./add-instance.sh claudebot3 claudius-tertius "Claudius Tertius"
 #
@@ -17,12 +18,15 @@ set -euo pipefail
 
 die() { echo "add-instance: $*" >&2; exit 1; }
 
-[[ $# -eq 3 ]] || die "usage: REPOS=... GIT_AUTHOR_NAME=... GIT_AUTHOR_EMAIL=... $0 <unix-user> <label> <display name>"
+[[ $# -eq 3 ]] || die "usage: REPOS=... GITHUB_CLIENT_ID=... GIT_AUTHOR_NAME=... GIT_AUTHOR_EMAIL=... $0 <unix-user> <label> <display name>"
 user=$1
 label=$2
 instance=$3
 
 [[ -n ${REPOS:-} ]] || die "set REPOS=owner/name=/abs/path/to/clone[,...] — see README"
+# One OAuth App is shared by every instance — the device flow is what makes
+# each one a different GitHub account, not a different app.
+[[ -n ${GITHUB_CLIENT_ID:-} ]] || die "set GITHUB_CLIENT_ID — the GitHub OAuth App the device flow authorizes against"
 [[ -n ${GIT_AUTHOR_NAME:-} ]] || die "set GIT_AUTHOR_NAME — commits are attributed to it"
 [[ -n ${GIT_AUTHOR_EMAIL:-} ]] || die "set GIT_AUTHOR_EMAIL — must be verified on this instance's GitHub account"
 
@@ -90,6 +94,7 @@ else
     umask 077
     cat > "$env_file" <<EOF
 REPOS=$REPOS
+GITHUB_CLIENT_ID=$GITHUB_CLIENT_ID
 LABEL=$label
 INSTANCE=$instance
 PLAN_MODEL=${PLAN_MODEL:-claude-opus-5}

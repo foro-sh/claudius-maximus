@@ -11,6 +11,7 @@ trap 'rm -f "$fake_binary"' EXIT
 run() {
     env CLAUDIUS_BINARY="${CLAUDIUS_BINARY-$fake_binary}" \
         REPOS="${REPOS-foro-sh/platform=/home/bot3/repos/platform}" \
+        GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID-Iv1.testclientid}" \
         GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME-Someone}" \
         GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL-someone@example.com}" \
         ./add-instance.sh "$@" 2>&1
@@ -31,6 +32,7 @@ expect "must run as root" "$(run bot3 claudius-tertius 'Claudius Tertius')"
 expect "usage:" "$(run bot3 claudius-tertius)"
 expect "set REPOS" "$(REPOS= run bot3 l 'I')"
 expect "set GIT_AUTHOR_EMAIL" "$(GIT_AUTHOR_EMAIL= run bot3 l 'I')"
+expect "set GITHUB_CLIENT_ID" "$(GITHUB_CLIENT_ID= run bot3 l 'I')"
 expect "clone path must be absolute" "$(REPOS=foro-sh/platform=repos/platform run bot3 l 'I')"
 expect "want owner/name=" "$(REPOS=platform=/home/bot3/repos/platform run bot3 l 'I')"
 # The one that matters: instance 3 pointed at instance 2's tree.
