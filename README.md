@@ -1,7 +1,7 @@
 # Claudius Maximus
 
 <p align="center">
-  <img src="assets/claudius-maximus.jpg" alt="Claudius Maximus" width="640">
+  <img src="assets/claudius-maximus.jpg" alt="Claudius Maximus" width="100%">
 </p>
 
 A single long-running binary that continuously turns labeled GitHub issues into
