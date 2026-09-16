@@ -13,8 +13,8 @@
 # user, the LABEL, and — title-cased — the INSTANCE display name. Pass a name
 # from that list explicitly to re-run / repair that slot.
 #
-# Clone paths default to /home/<name>/repos/<repo> when REPOS entries omit a
-# path. Absolute paths are still accepted and must stay under that home.
+# Clone paths default to /home/<name>/repos/<owner>/<repo> when REPOS entries
+# omit a path. Absolute paths are still accepted and must stay under that home.
 #
 # The two steps that need a human — `claude login` for that person's
 # subscription, and the worker's own GitHub device flow — are printed at the
@@ -138,7 +138,7 @@ home=/home/$user
 # before the script needs root at all. Two instances sharing a working tree
 # corrupt each other (both check out branches and hard-reset onto origin's
 # default), so a clone outside this instance's own home is refused, not warned
-# about. Path may be omitted: owner/name → /home/<user>/repos/<name>.
+# about. Path may be omitted: owner/name → /home/<user>/repos/owner/name.
 declare -A clones=()
 declare -a repos_expanded=()
 IFS=',' read -ra entries <<< "$REPOS"
@@ -152,7 +152,7 @@ for entry in "${entries[@]}"; do
     path=
     authors=
     if [[ -z $rest ]]; then
-        path=$home/repos/${repo##*/}
+        path=$home/repos/$repo
     elif [[ $rest == /* ]]; then
         path=${rest%%=*}
         if [[ $rest == *=* ]]; then
@@ -165,10 +165,13 @@ for entry in "${entries[@]}"; do
         die "invalid REPOS entry '$entry' (clone path must be absolute)"
     else
         # authors only — no path
-        path=$home/repos/${repo##*/}
+        path=$home/repos/$repo
         authors=$rest
     fi
     [[ $path == "$home"/* ]] || die "clone path $path is outside $home — instances must never share a working tree"
+    if [[ -n ${clones[$path]+x} && ${clones[$path]} != "$repo" ]]; then
+        die "clone path $path is claimed by both ${clones[$path]} and $repo"
+    fi
     clones[$path]=$repo
     if [[ -n $authors ]]; then
         repos_expanded+=("$repo=$path=$authors")

@@ -177,7 +177,7 @@ containing spaces; unquoted, systemd drops everything after the space.
 `REPOS` is a comma-separated list of
 `owner/name[=/abs/path/to/clone][=author|author]` entries — **no spaces**. When
 the path is omitted, `add-instance.sh` expands it to
-`/home/<instance>/repos/<repo>` and writes the absolute form into the env file
+`/home/<instance>/repos/<owner>/<name>` and writes the absolute form into the env file
 (the worker still requires absolute paths). A malformed entry aborts the worker
 at startup rather than silently auditing the wrong tree. Sweep order follows
 list order.
@@ -269,7 +269,7 @@ sudo env REPOS=foro-sh/platform \
 ```
 
 `REPOS` may be just `owner/name` (clone lands at
-`/home/<instance>/repos/<name>`), `owner/name=alice|bob` (same, with an author
+`/home/<instance>/repos/<owner>/<name>`), `owner/name=alice|bob` (same, with an author
 allowlist), or the full `owner/name=/abs/path[=authors]` form. Absolute paths
 must stay under the instance's own `$HOME`.
 

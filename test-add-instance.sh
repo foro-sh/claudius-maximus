@@ -45,6 +45,9 @@ expect "instances must never share a working tree" \
 # Authors-only form still defaults the clone under this instance's home.
 expect "must run as root" \
     "$(REPOS='foro-sh/platform=alice|bob' run claudius-tertius)"
+# Two repos with the same basename must not share one default tree.
+expect "claimed by both" \
+    "$(REPOS='foro-sh/platform=/home/claudius-tertius/repos/x,acme/platform=/home/claudius-tertius/repos/x' run claudius-tertius)"
 # Absolute path + authors still fine.
 expect "must run as root" \
     "$(REPOS='foro-sh/platform=/home/claudius-tertius/repos/platform=alice|bob' run claudius-tertius)"
