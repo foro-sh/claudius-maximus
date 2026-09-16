@@ -5,7 +5,8 @@
 //!   author not in the repo's allowlist -> skipped entirely
 //!   blocked by an open issue           -> skipped until every blocker closes
 //!   labeled, no `<label>:planned`      -> Claude posts a plan comment, add planned
-//!   `<label>:planned`                  -> Claude implements + opens a PR, add `<label>:done`
+//!   `<label>:planned`                  -> Claude implements, worker pushes and
+//!                                         opens the PR, add `<label>:done`
 //!   `<label>:done`                     -> ignored
 //!
 //! No approval step: applying the label is the only human action required. The
