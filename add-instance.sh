@@ -59,7 +59,7 @@ done
 for env_file in /etc/claudius-*.env; do
     [[ -e $env_file ]] || continue
     [[ $env_file == "/etc/claudius-$user.env" ]] && continue
-    if grep -qE "^LABEL=$label\$" "$env_file"; then
+    if grep -qxF "LABEL=$label" "$env_file"; then
         die "label '$label' is already owned by $env_file — every instance needs its own queue"
     fi
 done
@@ -97,7 +97,7 @@ PLAN_EFFORT=${PLAN_EFFORT:-high}
 IMPLEMENT_MODEL=${IMPLEMENT_MODEL:-claude-sonnet-5}
 IMPLEMENT_EFFORT=${IMPLEMENT_EFFORT:-high}
 POLL_INTERVAL=${POLL_INTERVAL:-60}
-CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=${CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL:-}
+${CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL:+CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=$CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL}
 GIT_AUTHOR_NAME="$GIT_AUTHOR_NAME"
 GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL
 GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$GIT_AUTHOR_NAME}"
@@ -108,7 +108,11 @@ EOF
     echo "wrote $env_file"
 fi
 
-install -m 644 claudius@.service /etc/systemd/system/claudius@.service
+unit=/etc/systemd/system/claudius@.service
+if [[ -e $unit ]] && ! cmp -s claudius@.service "$unit"; then
+    die "$unit differs from this checkout's — reconcile them, then re-run (the template is shared by every instance)"
+fi
+install -m 644 claudius@.service "$unit"
 systemctl daemon-reload
 
 cat <<EOF
