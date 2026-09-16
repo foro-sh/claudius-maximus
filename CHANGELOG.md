@@ -1,3 +1,12 @@
+## [0.6.0](https://github.com/foro-sh/claudius-maximus/compare/v0.5.0...v0.6.0) (2026-09-16)
+
+### Features
+
+* **github:** open pull requests ([eaff807](https://github.com/foro-sh/claudius-maximus/commit/eaff807a5e5b7fc59db4cabfa84a075941ca5698))
+* **worker:** push the branch and open the PR itself ([cbea003](https://github.com/foro-sh/claudius-maximus/commit/cbea003248d1f7b89b24a2bb43c6568bbc634fda))
+* **worker:** run against the real GitHub client ([1423ee5](https://github.com/foro-sh/claudius-maximus/commit/1423ee5d4c91c5b54efad94ae387577e1da92488))
+* **worker:** spawn agents against real GitHub ([#9](https://github.com/foro-sh/claudius-maximus/issues/9)) ([6c01ede](https://github.com/foro-sh/claudius-maximus/commit/6c01ede56f048b68d60afb931c6b277daaecb293))
+
 ## [0.5.0](https://github.com/foro-sh/claudius-maximus/compare/v0.4.0...v0.5.0) (2026-09-16)
 
 ### Features

@@ -8,9 +8,11 @@ fake_binary=$(mktemp) && chmod +x "$fake_binary"
 trap 'rm -f "$fake_binary"' EXIT
 
 # stdout+stderr of one run, with a valid baseline env the case can override.
+# Default REPOS omits the clone path so the script expands it under the
+# auto-picked (or explicit) instance home.
 run() {
     env CLAUDIUS_BINARY="${CLAUDIUS_BINARY-$fake_binary}" \
-        REPOS="${REPOS-foro-sh/platform=/home/bot3/repos/platform}" \
+        REPOS="${REPOS-foro-sh/claudius-maximus}" \
         GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID-Iv1.testclientid}" \
         GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME-Someone}" \
         GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL-someone@example.com}" \
@@ -25,23 +27,56 @@ expect() {
     fail=1
 }
 
-# A config with nothing wrong with it reaches the root check and stops there,
-# which is as far as this test can go unprivileged.
-expect "must run as root" "$(run bot3 claudius-tertius 'Claudius Tertius')"
+# Auto-pick (no args) and an explicit known name both reach the root check.
+expect "must run as root" "$(run)"
+expect "must run as root" "$(run claudius-tertius)"
 
-expect "usage:" "$(run bot3 claudius-tertius)"
-expect "set REPOS" "$(REPOS= run bot3 l 'I')"
-expect "set GIT_AUTHOR_EMAIL" "$(GIT_AUTHOR_EMAIL= run bot3 l 'I')"
-expect "set GITHUB_CLIENT_ID" "$(GITHUB_CLIENT_ID= run bot3 l 'I')"
-expect "clone path must be absolute" "$(REPOS=foro-sh/platform=repos/platform run bot3 l 'I')"
-expect "want owner/name=" "$(REPOS=platform=/home/bot3/repos/platform run bot3 l 'I')"
+expect "usage:" "$(run claudius-tertius extra)"
+expect "not a known instance name" "$(run claudius-primus)"
+expect "set REPOS" "$(REPOS= run claudius-tertius)"
+expect "set GIT_AUTHOR_EMAIL" "$(GIT_AUTHOR_EMAIL= run claudius-tertius)"
+expect "set GITHUB_CLIENT_ID" "$(GITHUB_CLIENT_ID= run claudius-tertius)"
+expect "clone path must be absolute" \
+    "$(REPOS=foro-sh/claudius-maximus=repos/claudius-maximus run claudius-tertius)"
+expect "want owner/name" "$(REPOS=platform run claudius-tertius)"
 # The one that matters: instance 3 pointed at instance 2's tree.
 expect "instances must never share a working tree" \
-    "$(REPOS=foro-sh/platform=/home/bot2/repos/platform run bot3 l 'I')"
-# A per-repo author allowlist is a third field, not a second clone path.
+    "$(REPOS=foro-sh/claudius-maximus=/home/claudius-secundus/repos/claudius-maximus run claudius-tertius)"
+# Authors-only form still defaults the clone under this instance's home.
 expect "must run as root" \
-    "$(REPOS='foro-sh/platform=/home/bot3/repos/platform=alice|bob' run bot3 l 'I')"
-expect "no binary at" "$(CLAUDIUS_BINARY=/nonexistent run bot3 l 'I')"
+    "$(REPOS='foro-sh/claudius-maximus=alice|bob' run claudius-tertius)"
+# Two repos with the same basename must not share one default tree.
+expect "claimed by both" \
+    "$(REPOS='foro-sh/foro=/home/claudius-tertius/repos/x,acme/foro=/home/claudius-tertius/repos/x' run claudius-tertius)"
+# Absolute path + authors still fine.
+expect "must run as root" \
+    "$(REPOS='foro-sh/claudius-maximus=/home/claudius-tertius/repos/claudius-maximus=alice|bob' run claudius-tertius)"
+expect "no binary at" "$(CLAUDIUS_BINARY=/nonexistent run claudius-tertius)"
+
+# 100 Latin ordinals in the table (tokens inside the INSTANCE_ORDINALS array).
+ordinals_count=$(sed -n '/^INSTANCE_ORDINALS=(/,/^)/p' add-instance.sh \
+    | tr -s '[:space:]' '\n' \
+    | grep -cE '^[a-z]+(-[a-z]+)*$')
+[[ $ordinals_count -eq 100 ]] || {
+    echo "FAIL: expected 100 ordinals, got $ordinals_count"
+    fail=1
+}
+
+display=$(bash -c '
+display_name_from_instance() {
+    local out= part
+    local IFS=-
+    for part in $1; do
+        out+="${out:+ }${part^}"
+    done
+    echo "$out"
+}
+display_name_from_instance claudius-vicesimus-primus
+')
+[[ $display == "Claudius Vicesimus Primus" ]] || {
+    echo "FAIL: display name got ${display@Q}"
+    fail=1
+}
 
 [[ $fail -eq 0 ]] && echo "all add-instance.sh config checks passed"
 exit $fail

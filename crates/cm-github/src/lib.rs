@@ -69,7 +69,7 @@ pub trait GithubClient: Send + Sync {
     ) -> anyhow::Result<String>;
 
     /// True if any open issue is listed under this issue's `blocked_by`
-    /// dependency relationship (the GitHub feature `declaring-issue-dependencies`
-    /// in the platform repo writes edges into).
+    /// dependency relationship (the GitHub feature the
+    /// `declaring-issue-dependencies` skill writes edges into).
     async fn blocked_by_open_issue(&self, repo: &str, number: u64) -> anyhow::Result<bool>;
 }

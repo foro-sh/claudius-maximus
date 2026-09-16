@@ -1,5 +1,4 @@
-//! The state machine and poll loop, ported from `worker.sh` in
-//! `foro-sh/platform`'s `infra/claudius-maximus/`.
+//! The state machine and poll loop, ported from the original bash `worker.sh`.
 //!
 //! State machine per issue (label = `config.label`):
 //!   author not in the repo's allowlist -> skipped entirely
@@ -1224,15 +1223,15 @@ mod tests {
         let harness = Harness::new(
             config(
                 vec![
-                    repo("foro-sh/platform", "platform", &[]),
+                    repo("foro-sh/claudius-maximus", "claudius-maximus", &[]),
                     repo("foro-sh/foro", "foro", &["danielsteman", "thijssdaniels"]),
                 ],
                 LABEL,
                 "Claudius Maximus",
             ),
             vec![
-                // platform has no allowlist: every author is trusted there.
-                FakeIssue::new("foro-sh/platform", 101, "randomdrifter", &[LABEL]),
+                // claudius-maximus has no allowlist: every author is trusted there.
+                FakeIssue::new("foro-sh/claudius-maximus", 101, "randomdrifter", &[LABEL]),
                 FakeIssue::new("foro-sh/foro", 7, "thijssdaniels", &[LABEL]),
                 FakeIssue::new("foro-sh/foro", 8, "randomdrifter", &[LABEL]),
                 // GitHub logins are case-insensitive.
@@ -1291,14 +1290,14 @@ mod tests {
     async fn a_second_instances_label_never_overlaps_the_first() {
         let harness = Harness::new(
             config(
-                vec![repo("foro-sh/platform", "platform", &[])],
+                vec![repo("foro-sh/claudius-maximus", "claudius-maximus", &[])],
                 "claudius-secundus",
                 "Claudius Secundus",
             ),
             vec![
-                FakeIssue::new("foro-sh/platform", 101, "danielsteman", &[LABEL]),
+                FakeIssue::new("foro-sh/claudius-maximus", 101, "danielsteman", &[LABEL]),
                 FakeIssue::new(
-                    "foro-sh/platform",
+                    "foro-sh/claudius-maximus",
                     102,
                     "danielsteman",
                     &["claudius-secundus", "claudius-secundus:planned"],
@@ -1311,12 +1310,12 @@ mod tests {
         harness.sweep().await;
 
         assert_eq!(
-            harness.github.labels("foro-sh/platform", 101),
+            harness.github.labels("foro-sh/claudius-maximus", 101),
             vec![LABEL.to_string()],
             "the other instance's queue is untouched"
         );
         assert_eq!(
-            harness.github.labels("foro-sh/platform", 102),
+            harness.github.labels("foro-sh/claudius-maximus", 102),
             vec![
                 "claudius-secundus:planned".to_string(),
                 "claudius-secundus:done".to_string()
@@ -1334,17 +1333,17 @@ mod tests {
         let harness = Harness::new(
             config(
                 vec![
-                    repo("foro-sh/platform", "platform", &[]),
+                    repo("foro-sh/claudius-maximus", "claudius-maximus", &[]),
                     repo("foro-sh/foro", "foro", &[]),
                 ],
                 LABEL,
                 "Claudius Maximus",
             ),
             vec![
-                FakeIssue::new("foro-sh/platform", 101, "danielsteman", &[LABEL]),
+                FakeIssue::new("foro-sh/claudius-maximus", 101, "danielsteman", &[LABEL]),
                 FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
             ],
-            FakeClaude::failing_for(&["platform"]),
+            FakeClaude::failing_for(&["claudius-maximus"]),
         );
 
         harness.sweep().await;
@@ -1357,7 +1356,7 @@ mod tests {
             .collect();
         assert_eq!(planned, vec![7], "a failed plan files no comment");
         assert_eq!(
-            harness.github.labels("foro-sh/platform", 101),
+            harness.github.labels("foro-sh/claudius-maximus", 101),
             vec![LABEL.to_string()],
             "the failed issue keeps only the trigger label, so the next sweep retries it"
         );

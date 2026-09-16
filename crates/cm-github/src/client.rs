@@ -389,7 +389,7 @@ mod tests {
     }
 
     fn issue_json(number: u64, login: &str, is_pull_request: bool) -> Value {
-        let url = format!("https://api.github.com/repos/foro-sh/platform/issues/{number}");
+        let url = format!("https://api.github.com/repos/foro-sh/foro/issues/{number}");
         let mut issue = json!({
             "id": number,
             "node_id": "I_1",
@@ -624,7 +624,7 @@ mod tests {
         let server = MockServer::start().await;
         let client = client(&server).await;
         Mock::given(method("GET"))
-            .and(path("/repos/foro-sh/platform/issues"))
+            .and(path("/repos/foro-sh/foro/issues"))
             .and(query_param("labels", "claudius-maximus"))
             .and(query_param("state", "open"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
@@ -635,7 +635,7 @@ mod tests {
             .await;
 
         let issues = client
-            .list_labeled_issues("foro-sh/platform", "claudius-maximus")
+            .list_labeled_issues("foro-sh/foro", "claudius-maximus")
             .await
             .unwrap();
 
@@ -655,7 +655,7 @@ mod tests {
         let server = MockServer::start().await;
         let client = client(&server).await;
         Mock::given(method("GET"))
-            .and(path("/repos/foro-sh/platform/issues/12/labels"))
+            .and(path("/repos/foro-sh/foro/issues/12/labels"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
                 { "id": 1, "node_id": "L_1", "url": "https://api.github.com/l/1",
                   "name": "claudius-maximus", "color": "ededed", "default": false },
@@ -666,7 +666,7 @@ mod tests {
             .await;
 
         assert_eq!(
-            client.issue_labels("foro-sh/platform", 12).await.unwrap(),
+            client.issue_labels("foro-sh/foro", 12).await.unwrap(),
             vec!["claudius-maximus".to_owned(), "cm:planning".to_owned()]
         );
     }
@@ -676,7 +676,7 @@ mod tests {
         let server = MockServer::start().await;
         let client = client(&server).await;
         Mock::given(method("POST"))
-            .and(path("/repos/foro-sh/platform/issues/12/labels"))
+            .and(path("/repos/foro-sh/foro/issues/12/labels"))
             .and(body_json(json!({ "labels": ["cm:planning"] })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .expect(1)
@@ -684,7 +684,7 @@ mod tests {
             .await;
 
         client
-            .add_label("foro-sh/platform", 12, "cm:planning")
+            .add_label("foro-sh/foro", 12, "cm:planning")
             .await
             .unwrap();
     }
@@ -695,16 +695,14 @@ mod tests {
         let client = client(&server).await;
         Mock::given(method("DELETE"))
             // octocrab percent-encodes the label name into the route.
-            .and(path(
-                "/repos/foro-sh/platform/issues/12/labels/cm%3Aplanning",
-            ))
+            .and(path("/repos/foro-sh/foro/issues/12/labels/cm%3Aplanning"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .expect(1)
             .mount(&server)
             .await;
 
         client
-            .remove_label("foro-sh/platform", 12, "cm:planning")
+            .remove_label("foro-sh/foro", 12, "cm:planning")
             .await
             .unwrap();
     }
@@ -755,7 +753,7 @@ mod tests {
         let server = MockServer::start().await;
         let client = client(&server).await;
         Mock::given(method("POST"))
-            .and(path("/repos/foro-sh/platform/issues/12/comments"))
+            .and(path("/repos/foro-sh/foro/issues/12/comments"))
             .and(body_json(json!({ "body": "planning" })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "id": 1,
@@ -773,7 +771,7 @@ mod tests {
             .await;
 
         client
-            .comment("foro-sh/platform", 12, "planning")
+            .comment("foro-sh/foro", 12, "planning")
             .await
             .unwrap();
     }
@@ -782,8 +780,8 @@ mod tests {
         json!({
             "id": number,
             "node_id": "PR_1",
-            "url": format!("https://api.github.com/repos/foro-sh/platform/pulls/{number}"),
-            "html_url": format!("https://github.com/foro-sh/platform/pull/{number}"),
+            "url": format!("https://api.github.com/repos/foro-sh/foro/pulls/{number}"),
+            "html_url": format!("https://github.com/foro-sh/foro/pull/{number}"),
             "number": number,
             "state": "open",
             "title": "something to do",
@@ -798,7 +796,7 @@ mod tests {
         let server = MockServer::start().await;
         let client = client(&server).await;
         Mock::given(method("POST"))
-            .and(path("/repos/foro-sh/platform/pulls"))
+            .and(path("/repos/foro-sh/foro/pulls"))
             .and(body_json(json!({
                 "title": "something to do",
                 "head": "claude/issue-12",
@@ -815,7 +813,7 @@ mod tests {
         assert_eq!(
             client
                 .create_pull_request(
-                    "foro-sh/platform",
+                    "foro-sh/foro",
                     "claude/issue-12",
                     "main",
                     "something to do",
@@ -823,7 +821,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            "https://github.com/foro-sh/platform/pull/30"
+            "https://github.com/foro-sh/foro/pull/30"
         );
     }
 
@@ -833,7 +831,7 @@ mod tests {
         let client = client(&server).await;
         // What GitHub answers for a head that already has an open PR.
         Mock::given(method("POST"))
-            .and(path("/repos/foro-sh/platform/pulls"))
+            .and(path("/repos/foro-sh/foro/pulls"))
             .respond_with(ResponseTemplate::new(422).set_body_json(json!({
                 "message": "Validation Failed",
                 "errors": [{ "message": "A pull request already exists for foro-sh:claude/issue-12." }],
@@ -842,7 +840,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/repos/foro-sh/platform/pulls"))
+            .and(path("/repos/foro-sh/foro/pulls"))
             .and(query_param("head", "foro-sh:claude/issue-12"))
             .and(query_param("state", "open"))
             .respond_with(
@@ -855,7 +853,7 @@ mod tests {
         assert_eq!(
             client
                 .create_pull_request(
-                    "foro-sh/platform",
+                    "foro-sh/foro",
                     "claude/issue-12",
                     "main",
                     "something to do",
@@ -863,7 +861,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            "https://github.com/foro-sh/platform/pull/29",
+            "https://github.com/foro-sh/foro/pull/29",
             "a retry must reuse the open PR, never open a second one"
         );
     }
@@ -873,7 +871,7 @@ mod tests {
         let server = MockServer::start().await;
         let client = client(&server).await;
         Mock::given(method("POST"))
-            .and(path("/repos/foro-sh/platform/pulls"))
+            .and(path("/repos/foro-sh/foro/pulls"))
             .respond_with(ResponseTemplate::new(422).set_body_json(json!({
                 "message": "Validation Failed",
                 "errors": [{ "message": "No commits between main and claude/issue-12." }],
@@ -882,14 +880,14 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/repos/foro-sh/platform/pulls"))
+            .and(path("/repos/foro-sh/foro/pulls"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .mount(&server)
             .await;
 
         client
             .create_pull_request(
-                "foro-sh/platform",
+                "foro-sh/foro",
                 "claude/issue-12",
                 "main",
                 "something to do",
@@ -902,7 +900,7 @@ mod tests {
     async fn blocked_by(server: &MockServer, blockers: Value) {
         Mock::given(method("GET"))
             .and(path(
-                "/repos/foro-sh/platform/issues/12/dependencies/blocked_by",
+                "/repos/foro-sh/foro/issues/12/dependencies/blocked_by",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(blockers))
             .mount(server)
@@ -924,7 +922,7 @@ mod tests {
 
         assert!(
             client
-                .blocked_by_open_issue("foro-sh/platform", 12)
+                .blocked_by_open_issue("foro-sh/foro", 12)
                 .await
                 .unwrap()
         );
@@ -940,7 +938,7 @@ mod tests {
 
         assert!(
             !client
-                .blocked_by_open_issue("foro-sh/platform", 12)
+                .blocked_by_open_issue("foro-sh/foro", 12)
                 .await
                 .unwrap()
         );
@@ -954,7 +952,7 @@ mod tests {
 
         assert!(
             !client
-                .blocked_by_open_issue("foro-sh/platform", 12)
+                .blocked_by_open_issue("foro-sh/foro", 12)
                 .await
                 .unwrap()
         );

@@ -1,8 +1,9 @@
 [Unit]
 # Template unit: %i is the unix user the instance runs as, e.g.
-#   systemctl enable --now claudius@claudebot      (Claudius Maximus)
-#   systemctl enable --now claudius@claudebot2     (Claudius Secundus)
-#   systemctl enable --now claudius@claudebot3     (Claudius Tertius)
+#   systemctl enable --now claudius@claudius-maximus   (Claudius Maximus)
+#   systemctl enable --now claudius@claudius-secundus  (Claudius Secundus)
+#   systemctl enable --now claudius@claudius-tertius   (Claudius Tertius)
+# add-instance.sh assigns those Latin-ordinal names (cap 100).
 # One instance per Claude subscription, and as many as there are
 # subscriptions — systemd runs the set, nothing supervises them from inside
 # the binary. Each user has its own $HOME, which is what scopes the
@@ -28,7 +29,7 @@ Environment=CLAUDE_CODE_RETRY_WATCHDOG=1
 # attributed to (that email must be verified on the instance's GitHub account).
 # Values with spaces need quoting in this file too — unquoted, a name like
 # "Daniel Steman" loses its second word.
-EnvironmentFile=/etc/claudius-%i.env
+EnvironmentFile=/etc/%i.env
 ExecStart=/home/%i/claudius-maximus/claudius-maximus
 Restart=always
 RestartSec=30
