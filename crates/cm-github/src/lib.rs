@@ -20,6 +20,16 @@ pub struct Issue {
     pub body: String,
 }
 
+/// One comment on an issue. The author is what tells the worker's own plan
+/// comment apart from anything else posted on the issue — the marker that
+/// identifies a plan is public, so anyone able to comment could otherwise
+/// write one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueComment {
+    pub author: String,
+    pub body: String,
+}
+
 /// Everything the worker needs from GitHub. `repo` is always `"owner/name"`.
 ///
 /// This is the entire GitHub surface `worker.sh` used through `gh` today:
@@ -29,6 +39,10 @@ pub struct Issue {
 /// instance's home — see #1, and [`OctocrabGithubClient`].
 #[async_trait]
 pub trait GithubClient: Send + Sync {
+    /// The login this client acts as, so the worker can recognise its own
+    /// comments.
+    fn login(&self) -> &str;
+
     /// Open issues carrying `label`, pull requests excluded. A closed issue
     /// is finished work no matter what labels it still has on it.
     async fn list_labeled_issues(&self, repo: &str, label: &str) -> anyhow::Result<Vec<Issue>>;
@@ -36,11 +50,11 @@ pub trait GithubClient: Send + Sync {
     async fn add_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn remove_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<()>;
-    /// Every comment body on the issue, oldest first. The worker reads its own
-    /// plan comment back out of this on the implementing sweep — the plan is
+    /// Every comment on the issue, oldest first. The worker reads its own plan
+    /// comment back out of this on the implementing sweep — the plan is
     /// written one sweep and used the next, and GitHub is the only state the
     /// worker keeps.
-    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>>;
+    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<IssueComment>>;
     /// Open a pull request from `head` onto `base`, returning its URL. If one
     /// is already open for `head` — the branch is reused across retries — its
     /// URL comes back instead: a second PR for one issue is the thing to

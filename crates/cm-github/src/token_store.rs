@@ -65,39 +65,59 @@ impl TokenStore for FileStore {
             .path
             .parent()
             .context("the token path has no parent directory")?;
+
+        // A symlink at either end aims our write at something someone else
+        // chose — refuse rather than follow it, the same way the label claim
+        // does. `create_dir_all` and `set_permissions` both follow links, so
+        // the directory needs the check as much as the file does.
+        refuse_symlink(dir)?;
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("tightening {}", dir.display()))?;
+        refuse_symlink(&self.path)?;
 
-        // A symlink here aims our write at a file someone else chose — refuse
-        // rather than follow it, the same way the label claim does.
-        if fs::symlink_metadata(&self.path).is_ok_and(|meta| meta.is_symlink()) {
-            anyhow::bail!(
-                "token path {} is a symlink — refusing to write through it",
-                self.path.display()
-            );
-        }
-
-        // `mode` only applies when the file is created, so an existing file
-        // keeps whatever mode it has — hence the explicit `set_permissions`
-        // afterwards.
+        // Written beside the real file and renamed over it, so an interrupted
+        // write leaves the old token intact rather than a truncated file. A
+        // half-written token would read back as no token at all, and an
+        // unattended worker would then sit on a device-flow prompt nobody is
+        // there to answer.
+        let temporary = self.path.with_extension("tmp");
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(&self.path)
-            .with_context(|| format!("opening {}", self.path.display()))?;
+            .open(&temporary)
+            .with_context(|| format!("opening {}", temporary.display()))?;
+        // `mode` above is ignored when the file already exists — a leftover
+        // from an earlier crash — so tighten before the token goes in rather
+        // than after.
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("tightening {}", temporary.display()))?;
         file.write_all(token.as_bytes())
             .and_then(|_| file.write_all(b"\n"))
-            .with_context(|| format!("writing {}", self.path.display()))?;
-        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("tightening {}", self.path.display()))
+            .with_context(|| format!("writing {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("flushing {}", temporary.display()))?;
+        fs::rename(&temporary, &self.path)
+            .with_context(|| format!("renaming {} into place", temporary.display()))
     }
 
     fn location(&self) -> String {
         self.path.display().to_string()
     }
+}
+
+/// Refuses a path that is a symlink. A path that does not exist yet is fine —
+/// it is the redirect we are looking for, not the absence.
+fn refuse_symlink(path: &Path) -> anyhow::Result<()> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink()) {
+        anyhow::bail!(
+            "{} is a symlink — refusing to write through it",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -145,6 +165,42 @@ mod tests {
         store.store("gho_new").unwrap();
 
         assert_eq!(store.load().unwrap().as_deref(), Some("gho_new"));
+    }
+
+    #[test]
+    fn a_leftover_temporary_file_is_reused_without_widening_it() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        let temporary = home
+            .path()
+            .join(".claudius-maximus")
+            .join("github-token.tmp");
+        fs::create_dir_all(temporary.parent().unwrap()).unwrap();
+        fs::write(&temporary, "leftover").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.store("gho_token").unwrap();
+
+        assert_eq!(store.load().unwrap().as_deref(), Some("gho_token"));
+        assert_eq!(
+            fs::metadata(store.location()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !temporary.exists(),
+            "the temporary file is renamed, not left"
+        );
+    }
+
+    #[test]
+    fn refuses_to_write_through_a_symlinked_directory() {
+        let home = TempDir::new().unwrap();
+        let elsewhere = home.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.path().join(".claudius-maximus")).unwrap();
+
+        assert!(store(&home).store("gho_token").is_err());
+        assert!(!elsewhere.join("github-token").exists());
     }
 
     #[test]

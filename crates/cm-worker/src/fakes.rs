@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use cm_git::GitOps;
-use cm_github::{GithubClient, Issue};
+use cm_github::{GithubClient, Issue, IssueComment};
 
 use crate::claude_cli::Claude;
 
@@ -21,7 +21,7 @@ pub struct FakeIssue {
     pub title: String,
     pub body: String,
     pub labels: Vec<String>,
-    pub comments: Vec<String>,
+    pub comments: Vec<IssueComment>,
     pub blocked: bool,
 }
 
@@ -46,8 +46,16 @@ impl FakeIssue {
 
     /// An issue that was planned on an earlier sweep, carrying the comment
     /// that sweep left behind.
-    pub fn with_comment(mut self, body: &str) -> Self {
-        self.comments.push(body.to_string());
+    pub fn with_comment(self, body: &str) -> Self {
+        self.with_comment_by(FakeGithub::LOGIN, body)
+    }
+
+    /// A comment somebody other than the worker left.
+    pub fn with_comment_by(mut self, author: &str, body: &str) -> Self {
+        self.comments.push(IssueComment {
+            author: author.to_string(),
+            body: body.to_string(),
+        });
         self
     }
 }
@@ -70,6 +78,10 @@ pub struct FakeGithub {
 }
 
 impl FakeGithub {
+    /// The login the fake acts as, i.e. the author of everything the worker
+    /// posts through it.
+    pub const LOGIN: &'static str = "claudius-bot";
+
     pub fn new(issues: Vec<FakeIssue>) -> Self {
         FakeGithub {
             state: Mutex::new(GithubState {
@@ -106,6 +118,10 @@ impl FakeGithub {
 
 #[async_trait]
 impl GithubClient for FakeGithub {
+    fn login(&self) -> &str {
+        Self::LOGIN
+    }
+
     async fn list_labeled_issues(&self, repo: &str, label: &str) -> anyhow::Result<Vec<Issue>> {
         let mut state = self.state.lock().unwrap();
         state.calls.push(format!("list repo={repo} label={label}"));
@@ -177,12 +193,15 @@ impl GithubClient for FakeGithub {
             .iter_mut()
             .find(|i| i.repo == repo && i.number == number)
         {
-            issue.comments.push(body.to_string());
+            issue.comments.push(IssueComment {
+                author: Self::LOGIN.to_string(),
+                body: body.to_string(),
+            });
         }
         Ok(())
     }
 
-    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>> {
+    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<IssueComment>> {
         let mut state = self.state.lock().unwrap();
         state
             .calls

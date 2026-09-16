@@ -9,7 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::time::Duration;
 
 use crate::token_store::{FileStore, TokenStore};
-use crate::{GithubClient, Issue};
+use crate::{GithubClient, Issue, IssueComment};
 
 /// The REST API host, and — separately — the website, which is where the
 /// device flow endpoints live.
@@ -23,6 +23,7 @@ const SCOPES: [&str; 1] = ["repo"];
 pub struct OctocrabGithubClient {
     crab: Octocrab,
     token: String,
+    login: String,
 }
 
 impl OctocrabGithubClient {
@@ -90,7 +91,11 @@ impl OctocrabGithubClient {
 
         // `/user` is the cheapest call that fails iff the token is no good.
         match crab.current().user().await {
-            Ok(_) => Ok(Some(Self { crab, token })),
+            Ok(user) => Ok(Some(Self {
+                crab,
+                token,
+                login: user.login,
+            })),
             Err(octocrab::Error::GitHub { source, .. })
                 if source.status_code == http::StatusCode::UNAUTHORIZED =>
             {
@@ -211,7 +216,11 @@ impl GithubClient for OctocrabGithubClient {
         Ok(())
     }
 
-    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>> {
+    fn login(&self) -> &str {
+        &self.login
+    }
+
+    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<IssueComment>> {
         let (owner, name) = self.repo(repo)?;
         let page = self
             .crab
@@ -227,7 +236,10 @@ impl GithubClient for OctocrabGithubClient {
             .all_pages(page)
             .await?
             .into_iter()
-            .map(|c| c.body.unwrap_or_default())
+            .map(|c| IssueComment {
+                author: c.user.login,
+                body: c.body.unwrap_or_default(),
+            })
             .collect())
     }
 
@@ -461,7 +473,13 @@ mod tests {
     async fn reuses_a_stored_token_without_a_device_flow() {
         // No device-flow mocks: reaching them would 404 and fail the test.
         let server = MockServer::start().await;
-        assert_eq!(client(&server).await.token(), "stored-token");
+        let client = client(&server).await;
+        assert_eq!(client.token(), "stored-token");
+        assert_eq!(
+            client.login(),
+            "claudius",
+            "the token check already knows who we are, so nothing else has to ask"
+        );
     }
 
     #[tokio::test]
@@ -718,7 +736,16 @@ mod tests {
 
         assert_eq!(
             client.issue_comments("foro-sh/platform", 12).await.unwrap(),
-            vec!["a plan".to_owned(), "a later note".to_owned()]
+            vec![
+                IssueComment {
+                    author: "claudius".to_owned(),
+                    body: "a plan".to_owned(),
+                },
+                IssueComment {
+                    author: "claudius".to_owned(),
+                    body: "a later note".to_owned(),
+                },
+            ]
         );
     }
 
