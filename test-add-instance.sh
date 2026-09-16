@@ -12,7 +12,7 @@ trap 'rm -f "$fake_binary"' EXIT
 # auto-picked (or explicit) instance home.
 run() {
     env CLAUDIUS_BINARY="${CLAUDIUS_BINARY-$fake_binary}" \
-        REPOS="${REPOS-foro-sh/platform}" \
+        REPOS="${REPOS-foro-sh/claudius-maximus}" \
         GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID-Iv1.testclientid}" \
         GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME-Someone}" \
         GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL-someone@example.com}" \
@@ -37,20 +37,20 @@ expect "set REPOS" "$(REPOS= run claudius-tertius)"
 expect "set GIT_AUTHOR_EMAIL" "$(GIT_AUTHOR_EMAIL= run claudius-tertius)"
 expect "set GITHUB_CLIENT_ID" "$(GITHUB_CLIENT_ID= run claudius-tertius)"
 expect "clone path must be absolute" \
-    "$(REPOS=foro-sh/platform=repos/platform run claudius-tertius)"
+    "$(REPOS=foro-sh/claudius-maximus=repos/claudius-maximus run claudius-tertius)"
 expect "want owner/name" "$(REPOS=platform run claudius-tertius)"
 # The one that matters: instance 3 pointed at instance 2's tree.
 expect "instances must never share a working tree" \
-    "$(REPOS=foro-sh/platform=/home/claudius-secundus/repos/platform run claudius-tertius)"
+    "$(REPOS=foro-sh/claudius-maximus=/home/claudius-secundus/repos/claudius-maximus run claudius-tertius)"
 # Authors-only form still defaults the clone under this instance's home.
 expect "must run as root" \
-    "$(REPOS='foro-sh/platform=alice|bob' run claudius-tertius)"
+    "$(REPOS='foro-sh/claudius-maximus=alice|bob' run claudius-tertius)"
 # Two repos with the same basename must not share one default tree.
 expect "claimed by both" \
-    "$(REPOS='foro-sh/platform=/home/claudius-tertius/repos/x,acme/platform=/home/claudius-tertius/repos/x' run claudius-tertius)"
+    "$(REPOS='foro-sh/foro=/home/claudius-tertius/repos/x,acme/foro=/home/claudius-tertius/repos/x' run claudius-tertius)"
 # Absolute path + authors still fine.
 expect "must run as root" \
-    "$(REPOS='foro-sh/platform=/home/claudius-tertius/repos/platform=alice|bob' run claudius-tertius)"
+    "$(REPOS='foro-sh/claudius-maximus=/home/claudius-tertius/repos/claudius-maximus=alice|bob' run claudius-tertius)"
 expect "no binary at" "$(CLAUDIUS_BINARY=/nonexistent run claudius-tertius)"
 
 # 100 Latin ordinals in the table (tokens inside the INSTANCE_ORDINALS array).

@@ -3,7 +3,7 @@
 # its systemd unit. Run as root, from a checkout of this repo, once per
 # subscription you want draining a queue.
 #
-#   REPOS=foro-sh/platform \
+#   REPOS=foro-sh/claudius-maximus \
 #   GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx \
 #   GIT_AUTHOR_NAME="Someone" GIT_AUTHOR_EMAIL=someone@example.com \
 #   ./add-instance.sh

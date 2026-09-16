@@ -1,7 +1,6 @@
-//! `$REPOS` and the rest of the worker's env-var config. Rust port of
-//! `infra/claudius-maximus/repos.sh` + `worker.sh`'s config block in the
-//! platform repo — same format, same defaults, so migrating an instance's
-//! `/etc/<user>.env` needs no edits.
+//! `$REPOS` and the rest of the worker's env-var config. Rust port of the
+//! bash worker's `repos.sh` + config block — same format, same defaults, so
+//! migrating an instance's `/etc/<user>.env` needs no edits.
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -117,12 +116,12 @@ mod tests {
 
     #[test]
     fn parses_a_single_unrestricted_repo() {
-        let repos = parse_repos("foro-sh/platform=/home/claudebot/repos/platform").unwrap();
+        let repos = parse_repos("foro-sh/claudius-maximus=/home/claudius-maximus/repos/claudius-maximus").unwrap();
         assert_eq!(
             repos,
             vec![RepoEntry {
-                repo: "foro-sh/platform".to_string(),
-                clone_path: PathBuf::from("/home/claudebot/repos/platform"),
+                repo: "foro-sh/claudius-maximus".to_string(),
+                clone_path: PathBuf::from("/home/claudius-maximus/repos/claudius-maximus"),
                 authors: vec![],
             }]
         );
@@ -131,7 +130,7 @@ mod tests {
     #[test]
     fn parses_multiple_repos_with_an_author_allowlist() {
         let repos =
-            parse_repos("foro-sh/platform=/repos/platform,foro-sh/foro=/repos/foro=alice|bob")
+            parse_repos("foro-sh/claudius-maximus=/repos/claudius-maximus,foro-sh/foro=/repos/foro=alice|bob")
                 .unwrap();
         assert_eq!(repos.len(), 2);
         assert_eq!(repos[1].repo, "foro-sh/foro");
@@ -143,12 +142,12 @@ mod tests {
 
     #[test]
     fn rejects_a_missing_leading_slash() {
-        assert!(parse_repos("foro-sh/platform=repos/platform").is_err());
+        assert!(parse_repos("foro-sh/claudius-maximus=repos/claudius-maximus").is_err());
     }
 
     #[test]
     fn rejects_a_trailing_equals_with_no_authors() {
-        assert!(parse_repos("foro-sh/platform=/repos/platform=").is_err());
+        assert!(parse_repos("foro-sh/claudius-maximus=/repos/claudius-maximus=").is_err());
     }
 
     #[test]

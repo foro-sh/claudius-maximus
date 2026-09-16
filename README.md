@@ -17,7 +17,7 @@ throughput comes from adding instances — any number of them, each draining its
 own label. `add-instance.sh` provisions one; see
 [Adding an instance](#adding-an-instance).
 
-It started as a bash script in `foro-sh/platform` (`infra/claudius-maximus/`)
+It started as a bash script (`infra/claudius-maximus/`) in a private monorepo
 and is being ported to Rust here: `octocrab` for the GitHub API over device-flow
 OAuth, `git2` for git, and `std::process::Command` reserved for the `claude` CLI
 alone — so the box needs neither the `gh` CLI nor a `git` binary. The port is in
@@ -99,7 +99,7 @@ claude login && claude doctor
 unset ANTHROPIC_API_KEY            # and remove it from any profile/env
 
 # 2. Clone every target repo (one clone per entry in $REPOS).
-git clone https://github.com/foro-sh/platform.git /home/claudius-maximus/repos/platform
+git clone https://github.com/foro-sh/claudius-maximus.git /home/claudius-maximus/repos/claudius-maximus
 git clone https://github.com/foro-sh/foro.git     /home/claudius-maximus/repos/foro
 
 # 3. Drop the binary in place.
@@ -145,7 +145,7 @@ runs as, so `/etc/claudius-maximus.env` (chmod 640, owned by `claudius-maximus`)
 not invent a separate queue name.
 
 ```bash
-REPOS=foro-sh/platform=/home/claudius-maximus/repos/platform,foro-sh/foro=/home/claudius-maximus/repos/foro=danielsteman|thijssdaniels
+REPOS=foro-sh/claudius-maximus=/home/claudius-maximus/repos/claudius-maximus,foro-sh/foro=/home/claudius-maximus/repos/foro=danielsteman|thijssdaniels
 GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx  # the OAuth App the device flow authorizes against
 LABEL=claudius-maximus           # optional; defaults to claudius-maximus
 INSTANCE=Claudius Maximus        # optional; name in logs + Mattermost
@@ -258,7 +258,7 @@ list; pass a known name explicitly only to re-run / repair that slot.
 
 ```bash
 cargo build --release
-sudo env REPOS=foro-sh/platform \
+sudo env REPOS=foro-sh/claudius-maximus \
          GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx \
          GIT_AUTHOR_NAME="Person 3" \
          GIT_AUTHOR_EMAIL=<verified-email-on-person-3s-github-account> \
