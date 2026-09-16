@@ -1,80 +1,285 @@
 //! Where the OAuth token lives between runs.
 //!
-//! `keyring` 4's `v1` surface hardwires the platform credential store (macOS
-//! Keychain, Windows Credential Manager, Secret Service) and offers no
-//! in-memory backend, so tests would need a real OS keychain to run. This
-//! trait is the seam that keeps them off it — [`KeyringStore`] is the only
-//! implementation that ships.
+//! A file in the instance's own home, not an OS keychain: the worker runs as a
+//! `nologin` unix user under systemd, with no login session, no D-Bus and no
+//! Secret Service for a keychain to live in — `keyring` would have nothing to
+//! talk to on the box this ships to. `$HOME` is already the trust boundary
+//! that holds the instance's Claude subscription credentials, so the GitHub
+//! token sits beside them, readable only by that user.
+
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
 use anyhow::Context;
 
-/// Keychain service name every instance's entry is filed under.
-pub(crate) const SERVICE: &str = "claudius-maximus";
-
 pub(crate) trait TokenStore: Send + Sync {
-    /// The stored token for `instance_name`, or `None` if there isn't one yet.
-    fn load(&self, instance_name: &str) -> anyhow::Result<Option<String>>;
-    fn store(&self, instance_name: &str, token: &str) -> anyhow::Result<()>;
+    /// The stored token, or `None` if there isn't one yet.
+    fn load(&self) -> anyhow::Result<Option<String>>;
+    fn store(&self, token: &str) -> anyhow::Result<()>;
+    /// Where the token is kept, for the message that tells an operator which
+    /// one to delete when GitHub stops accepting it.
+    fn location(&self) -> String;
 }
 
-/// The OS keychain, keyed on the instance name.
-pub(crate) struct KeyringStore;
+/// A `0600` file under the instance's home.
+pub(crate) struct FileStore {
+    path: PathBuf,
+}
 
-impl KeyringStore {
-    fn entry(instance_name: &str) -> anyhow::Result<keyring::Entry> {
-        keyring::Entry::new(SERVICE, instance_name)
-            .with_context(|| format!("opening keychain entry {SERVICE}/{instance_name}"))
+impl FileStore {
+    /// `$HOME/.claudius-maximus/github-token`. One instance per unix user, so
+    /// the home directory is what keeps two instances' tokens apart — and
+    /// nothing in the name depends on `$INSTANCE`, which is a display name an
+    /// operator may reasonably reword. Keying the file on it would turn that
+    /// edit into a token the worker cannot find, and an unattended worker that
+    /// cannot find its token restarts into a device flow nobody answers.
+    pub(crate) fn in_home() -> anyhow::Result<Self> {
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .context("HOME is unset, so there is nowhere to keep the GitHub token")?;
+        Ok(Self::at(
+            Path::new(&home)
+                .join(".claudius-maximus")
+                .join("github-token"),
+        ))
+    }
+
+    pub(crate) fn at(path: PathBuf) -> Self {
+        FileStore { path }
     }
 }
 
-impl TokenStore for KeyringStore {
-    fn load(&self, instance_name: &str) -> anyhow::Result<Option<String>> {
-        match Self::entry(instance_name)?.get_password() {
-            Ok(token) => Ok(Some(token)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e).context("reading token from keychain"),
+impl TokenStore for FileStore {
+    fn load(&self) -> anyhow::Result<Option<String>> {
+        match fs::read_to_string(&self.path) {
+            // An empty file holds no token, whatever put it there. Reading it
+            // back as one would send GitHub an empty bearer, be refused, and
+            // park the worker on "delete the stored token" for a file that
+            // holds nothing.
+            Ok(token) => Ok(Some(token.trim().to_owned()).filter(|t| !t.is_empty())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| format!("reading {}", self.path.display())),
         }
     }
 
-    fn store(&self, instance_name: &str, token: &str) -> anyhow::Result<()> {
-        Self::entry(instance_name)?
-            .set_password(token)
-            .context("writing token to keychain")
+    fn store(&self, token: &str) -> anyhow::Result<()> {
+        let dir = self
+            .path
+            .parent()
+            .context("the token path has no parent directory")?;
+
+        // A symlink at either end aims our write at something someone else
+        // chose — refuse rather than follow it, the same way the label claim
+        // does. `create_dir_all` and `set_permissions` both follow links, so
+        // the directory needs the check as much as the file does.
+        refuse_symlink(dir)?;
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("tightening {}", dir.display()))?;
+        refuse_symlink(&self.path)?;
+
+        // Written beside the real file and renamed over it, so an interrupted
+        // write leaves the old token intact rather than a truncated file. A
+        // half-written token would read back as no token at all, and an
+        // unattended worker would then sit on a device-flow prompt nobody is
+        // there to answer.
+        let temporary = self.path.with_extension("tmp");
+        // The temporary file is the one actually opened and written through,
+        // so it is the one that must not be a symlink — a leftover from an
+        // earlier crash is reused as-is.
+        refuse_symlink(&temporary)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temporary)
+            .with_context(|| format!("opening {}", temporary.display()))?;
+        // `mode` above is ignored when the file already exists — a leftover
+        // from an earlier crash — so tighten before the token goes in rather
+        // than after.
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("tightening {}", temporary.display()))?;
+        file.write_all(token.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .with_context(|| format!("writing {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("flushing {}", temporary.display()))?;
+        fs::rename(&temporary, &self.path)
+            .with_context(|| format!("renaming {} into place", temporary.display()))
+    }
+
+    fn location(&self) -> String {
+        self.path.display().to_string()
+    }
+}
+
+/// Refuses a path that is a symlink. A path that does not exist yet is fine —
+/// it is the redirect we are looking for, not the absence. Any other stat
+/// error is propagated rather than read as "not a symlink": a path we cannot
+/// look at is not a path we should write through.
+fn refuse_symlink(path: &Path) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_symlink() => anyhow::bail!(
+            "{} is a symlink — refusing to write through it",
+            path.display()
+        ),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("looking at {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn store(home: &TempDir) -> FileStore {
+        FileStore::at(home.path().join(".claudius-maximus").join("github-token"))
+    }
+
+    #[test]
+    fn nothing_stored_yet_is_not_an_error() {
+        let home = TempDir::new().unwrap();
+        assert_eq!(store(&home).load().unwrap(), None);
+    }
+
+    #[test]
+    fn a_stored_token_comes_back_and_only_the_owner_can_read_it() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        store.store("gho_token").unwrap();
+
+        assert_eq!(store.load().unwrap().as_deref(), Some("gho_token"));
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(Path::new(&store.location())), 0o600);
+        assert_eq!(mode(&home.path().join(".claudius-maximus")), 0o700);
+    }
+
+    #[test]
+    fn a_half_written_token_file_reads_as_no_token_at_all() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        store.store("gho_token").unwrap();
+        fs::write(store.location(), "").unwrap();
+
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn re_authorizing_replaces_the_token_rather_than_appending_to_it() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        store.store("a-much-longer-old-token").unwrap();
+        store.store("gho_new").unwrap();
+
+        assert_eq!(store.load().unwrap().as_deref(), Some("gho_new"));
+    }
+
+    #[test]
+    fn a_leftover_temporary_file_is_reused_without_widening_it() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        let temporary = home
+            .path()
+            .join(".claudius-maximus")
+            .join("github-token.tmp");
+        fs::create_dir_all(temporary.parent().unwrap()).unwrap();
+        fs::write(&temporary, "leftover").unwrap();
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.store("gho_token").unwrap();
+
+        assert_eq!(store.load().unwrap().as_deref(), Some("gho_token"));
+        assert_eq!(
+            fs::metadata(store.location()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !temporary.exists(),
+            "the temporary file is renamed, not left"
+        );
+    }
+
+    #[test]
+    fn refuses_to_write_through_a_symlinked_temporary_file() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        let decoy = home.path().join("decoy");
+        fs::write(&decoy, "untouched").unwrap();
+        fs::create_dir_all(home.path().join(".claudius-maximus")).unwrap();
+        std::os::unix::fs::symlink(
+            &decoy,
+            home.path().join(".claudius-maximus/github-token.tmp"),
+        )
+        .unwrap();
+
+        assert!(store.store("gho_token").is_err());
+        assert_eq!(fs::read_to_string(&decoy).unwrap(), "untouched");
+    }
+
+    #[test]
+    fn refuses_to_write_through_a_symlinked_directory() {
+        let home = TempDir::new().unwrap();
+        let elsewhere = home.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, home.path().join(".claudius-maximus")).unwrap();
+
+        assert!(store(&home).store("gho_token").is_err());
+        assert!(!elsewhere.join("github-token").exists());
+    }
+
+    #[test]
+    fn refuses_to_write_through_a_symlinked_token_path() {
+        let home = TempDir::new().unwrap();
+        let store = store(&home);
+        let decoy = home.path().join("decoy");
+        fs::write(&decoy, "untouched").unwrap();
+        fs::create_dir_all(home.path().join(".claudius-maximus")).unwrap();
+        std::os::unix::fs::symlink(&decoy, home.path().join(".claudius-maximus/github-token"))
+            .unwrap();
+
+        assert!(store.store("gho_token").is_err());
+        assert_eq!(fs::read_to_string(&decoy).unwrap(), "untouched");
     }
 }
 
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::TokenStore;
-    use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// In-memory stand-in so tests never touch a real keychain.
+    /// In-memory stand-in so the client's tests never touch the filesystem.
     #[derive(Default)]
-    pub(crate) struct MemoryStore(Mutex<HashMap<String, String>>);
+    pub(crate) struct MemoryStore(Mutex<Option<String>>);
 
     impl MemoryStore {
-        pub(crate) fn with_token(instance_name: &str, token: &str) -> Self {
+        pub(crate) fn with_token(token: &str) -> Self {
             let this = Self::default();
-            this.store(instance_name, token).unwrap();
+            this.store(token).unwrap();
             this
         }
 
-        pub(crate) fn get(&self, instance_name: &str) -> Option<String> {
-            self.0.lock().unwrap().get(instance_name).cloned()
+        pub(crate) fn get(&self) -> Option<String> {
+            self.0.lock().unwrap().clone()
         }
     }
 
     impl TokenStore for MemoryStore {
-        fn load(&self, instance_name: &str) -> anyhow::Result<Option<String>> {
-            Ok(self.get(instance_name))
+        fn load(&self) -> anyhow::Result<Option<String>> {
+            Ok(self.get())
         }
 
-        fn store(&self, instance_name: &str, token: &str) -> anyhow::Result<()> {
-            self.0
-                .lock()
-                .unwrap()
-                .insert(instance_name.to_owned(), token.to_owned());
+        fn store(&self, token: &str) -> anyhow::Result<()> {
+            *self.0.lock().unwrap() = Some(token.to_owned());
             Ok(())
+        }
+
+        fn location(&self) -> String {
+            "<memory>".to_owned()
         }
     }
 }

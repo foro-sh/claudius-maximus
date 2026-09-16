@@ -110,8 +110,12 @@ chmod +x /home/claudius-maximus/claudius-maximus/claudius-maximus
 
 **GitHub login is the binary's own job.** On first run it starts GitHub's OAuth
 device flow: it prints a one-time code and a verification URL, you open the URL
-once as the account this instance acts as, and the token is stored in the OS
-keyring (Secret Service on Linux) — not in `/etc/<user>.env`. Same
+once as the account this instance acts as, and the token is stored in
+`$HOME/.claudius-maximus/github-token` (mode `0600`) — not in
+`/etc/claudius-<user>.env`. A file rather than the OS keyring because the
+instance is a `nologin` user under systemd, with no login session and no Secret
+Service for a keyring to live in; `$HOME` already holds that instance's Claude
+subscription credentials, so the GitHub token sits beside them. Same
 one-time ceremony `gh auth login` used to be, with no `gh` CLI on the box at all.
 Run it in the foreground once before enabling the unit, so you can complete the
 flow. It validates its config before anything else, so write
@@ -168,7 +172,7 @@ worker leaned on `gh`'s own OAuth app, this one has no `gh` to borrow from. It i
 a client id, not a secret: device flow has no client secret, and every instance
 shares the one app (the device flow is what makes each a different *account*).
 Create it once under Settings → Developer settings → OAuth Apps with "Enable
-Device Flow" ticked. No GitHub token here: that lives in the keyring.
+Device Flow" ticked. No GitHub token here: that lives in the instance's home.
 
 The `GIT_*` identity lives here rather than in the unit because it differs per
 instance — each instance commits as its own account holder. Quote values
@@ -218,7 +222,7 @@ person, on a separate GitHub account. There is no fixed number of them. The box
 runs as many as you have subscriptions for.
 
 **The instance boundary is a unix user.** Not an env var: `$HOME` is what scopes
-the Claude subscription OAuth credentials *and* the keyring the GitHub token
+the Claude subscription OAuth credentials *and* the file the GitHub token
 lands in, so N subscriptions means N homes. Nothing supervises them from inside
 the binary — one process serves one subscription, and systemd runs the set.
 `add-instance.sh` picks the unix user from a fixed Latin-ordinal list
@@ -305,8 +309,8 @@ automated:
 
 3. **The GitHub device flow.** Run the worker once in the foreground as that user,
    open the printed code and URL as this instance's GitHub account, then Ctrl-C.
-   The script prints the exact command; the token lands in that user's keyring,
-   never in the env file.
+   The script prints the exact command; the token lands in
+   `$HOME/.claudius-maximus/github-token`, never in the env file.
 
 Then start it:
 
@@ -372,8 +376,11 @@ Every repo in `$REPOS` needs all of these:
   an `origin` the bot can fetch. **Per instance** — two workers must never share
   a working tree. `add-instance.sh` clones over anonymous HTTPS, so a **private**
   repo has to be cloned by hand as that unix user, with credentials of your
-  choosing — the worker's own token only arrives later, at the device flow, and
-  is used for pushing, not fetching.
+  choosing — the worker's own token only arrives later, at the device flow.
+  From then on the worker fetches and pushes with that token, so the clone needs
+  no stored credential of its own. **`origin` must be an HTTPS URL**: the token
+  is all the worker offers, and an SSH remote would ask it for a key it does not
+  have.
 
 ## Known ceilings
 
@@ -396,8 +403,16 @@ Every repo in `$REPOS` needs all of these:
   instance idles when nobody labels for it. Assign labels evenly; that's the
   mechanism.
 - **No approval gate between plan and implement, by design.** Applying the
-  trigger label is the only human action required; the plan comment is posted
-  for visibility, not review. There is currently no way to plan an issue without
+  trigger label is the only human action required; nobody has to approve the
+  plan. The plan comment is not decoration, though — the implementing sweep
+  reads it back off the issue and hands it to Claude, together with the issue
+  itself, since the box has no GitHub access of its own. Editing the plan
+  comment before the next sweep is the one way to steer the implementation;
+  only comments the instance's own GitHub account wrote are read, so nobody
+  else can post a plan for it to follow. Leave the `:crown: Plan by …` line (or
+  the HTML marker under it) in place when you edit — one of the two is how the
+  next sweep finds the plan again. Delete the comment and the issue is simply
+  planned again. There is currently no way to plan an issue without
   also implementing it.
 - **`--dangerously-skip-permissions`** during implement — acceptable on an
   isolated, unprivileged box; tighten with a `settings.json` allowlist otherwise.

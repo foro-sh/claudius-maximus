@@ -8,8 +8,8 @@ use octocrab::params::State;
 use secrecy::{ExposeSecret, SecretString};
 use std::time::Duration;
 
-use crate::token_store::{KeyringStore, SERVICE, TokenStore};
-use crate::{GithubClient, Issue};
+use crate::token_store::{FileStore, TokenStore};
+use crate::{GithubClient, Issue, IssueComment};
 
 /// The REST API host, and — separately — the website, which is where the
 /// device flow endpoints live.
@@ -23,6 +23,7 @@ const SCOPES: [&str; 1] = ["repo"];
 pub struct OctocrabGithubClient {
     crab: Octocrab,
     token: String,
+    login: String,
 }
 
 impl OctocrabGithubClient {
@@ -44,7 +45,7 @@ impl OctocrabGithubClient {
         Self::login_or_load_with(
             instance_name,
             client_id,
-            &KeyringStore,
+            &FileStore::in_home()?,
             GITHUB_API,
             GITHUB_WEB,
         )
@@ -58,18 +59,19 @@ impl OctocrabGithubClient {
         api_uri: &str,
         web_uri: &str,
     ) -> anyhow::Result<Self> {
-        if let Some(token) = store.load(instance_name)? {
+        if let Some(token) = store.load()? {
             return Self::authenticated(api_uri, token).await?.with_context(|| {
                 format!(
                     "GitHub rejected the token stored for {instance_name:?} — revoked, expired, \
-                     or issued against another OAuth app. Delete the {SERVICE}/{instance_name} \
-                     entry from the keychain and restart to authorize again."
+                     or issued against another OAuth app. Delete {} and restart to authorize \
+                     again.",
+                    store.location()
                 )
             });
         }
 
         let token = device_flow(client_id, web_uri).await?;
-        store.store(instance_name, &token)?;
+        store.store(&token)?;
         Self::authenticated(api_uri, token)
             .await?
             .context("GitHub rejected the token it just issued")
@@ -89,7 +91,11 @@ impl OctocrabGithubClient {
 
         // `/user` is the cheapest call that fails iff the token is no good.
         match crab.current().user().await {
-            Ok(_) => Ok(Some(Self { crab, token })),
+            Ok(user) => Ok(Some(Self {
+                crab,
+                token,
+                login: user.login,
+            })),
             Err(octocrab::Error::GitHub { source, .. })
                 if source.status_code == http::StatusCode::UNAUTHORIZED =>
             {
@@ -155,6 +161,7 @@ impl GithubClient for OctocrabGithubClient {
                 number: i.number,
                 author: i.user.login,
                 title: i.title,
+                body: i.body.unwrap_or_default(),
             })
             .collect())
     }
@@ -207,6 +214,34 @@ impl GithubClient for OctocrabGithubClient {
             .await
             .with_context(|| format!("commenting on {repo}#{number}"))?;
         Ok(())
+    }
+
+    fn login(&self) -> &str {
+        &self.login
+    }
+
+    async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<IssueComment>> {
+        let (owner, name) = self.repo(repo)?;
+        let page = self
+            .crab
+            .issues(owner, name)
+            .list_comments(number)
+            .per_page(100)
+            .send()
+            .await
+            .with_context(|| format!("listing comments on {repo}#{number}"))?;
+
+        Ok(self
+            .crab
+            .all_pages(page)
+            .await
+            .with_context(|| format!("paging the comments on {repo}#{number}"))?
+            .into_iter()
+            .map(|c| IssueComment {
+                author: c.user.login,
+                body: c.body.unwrap_or_default(),
+            })
+            .collect())
     }
 
     async fn create_pull_request(
@@ -367,7 +402,7 @@ mod tests {
             "number": number,
             "state": "open",
             "title": "something to do",
-            "body": null,
+            "body": "the work order",
             "user": author(login),
             "labels": [],
             "assignees": [],
@@ -396,7 +431,7 @@ mod tests {
     /// A client already holding `stored-token`, pointed at the mock server.
     async fn client(server: &MockServer) -> OctocrabGithubClient {
         mock_valid_user(server).await;
-        let store = MemoryStore::with_token(INSTANCE, "stored-token");
+        let store = MemoryStore::with_token("stored-token");
         OctocrabGithubClient::login_or_load_with(
             INSTANCE,
             CLIENT_ID,
@@ -439,7 +474,13 @@ mod tests {
     async fn reuses_a_stored_token_without_a_device_flow() {
         // No device-flow mocks: reaching them would 404 and fail the test.
         let server = MockServer::start().await;
-        assert_eq!(client(&server).await.token(), "stored-token");
+        let client = client(&server).await;
+        assert_eq!(client.token(), "stored-token");
+        assert_eq!(
+            client.login(),
+            "claudius",
+            "the token check already knows who we are, so nothing else has to ask"
+        );
     }
 
     #[tokio::test]
@@ -465,7 +506,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(client.token(), "fresh-token");
-        assert_eq!(store.get(INSTANCE).as_deref(), Some("fresh-token"));
+        assert_eq!(store.get().as_deref(), Some("fresh-token"));
     }
 
     #[tokio::test]
@@ -483,7 +524,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let store = MemoryStore::with_token(INSTANCE, "stored-token");
+        let store = MemoryStore::with_token("stored-token");
         let error = OctocrabGithubClient::login_or_load_with(
             INSTANCE,
             CLIENT_ID,
@@ -502,7 +543,7 @@ mod tests {
             "unexpected error: {error:#}"
         );
         // The bad token is left in place; clearing it is the operator's call.
-        assert_eq!(store.get(INSTANCE).as_deref(), Some("stored-token"));
+        assert_eq!(store.get().as_deref(), Some("stored-token"));
     }
 
     #[tokio::test]
@@ -546,7 +587,7 @@ mod tests {
             error.to_string().contains("expired after 0s"),
             "unexpected error: {error:#}"
         );
-        assert_eq!(store.get(INSTANCE), None);
+        assert_eq!(store.get(), None);
     }
 
     #[tokio::test]
@@ -560,7 +601,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let store = MemoryStore::with_token(INSTANCE, "stored-token");
+        let store = MemoryStore::with_token("stored-token");
         let error = OctocrabGithubClient::login_or_load_with(
             INSTANCE,
             CLIENT_ID,
@@ -604,6 +645,7 @@ mod tests {
                 number: 12,
                 author: "danielsteman".to_owned(),
                 title: "something to do".to_owned(),
+                body: "the work order".to_owned(),
             }]
         );
     }
@@ -663,6 +705,47 @@ mod tests {
             .remove_label("foro-sh/foro", 12, "cm:planning")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn issue_comments_returns_the_bodies_oldest_first() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        let comment = |id: u64, body: &str| {
+            json!({
+                "id": id,
+                "node_id": format!("IC_{id}"),
+                "url": format!("https://api.github.com/c/{id}"),
+                "html_url": format!("https://github.com/c/{id}"),
+                "issue_url": "https://api.github.com/i/12",
+                "body": body,
+                "user": author("claudius"),
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/platform/issues/12/comments"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([comment(1, "a plan"), comment(2, "a later note")])),
+            )
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client.issue_comments("foro-sh/platform", 12).await.unwrap(),
+            vec![
+                IssueComment {
+                    author: "claudius".to_owned(),
+                    body: "a plan".to_owned(),
+                },
+                IssueComment {
+                    author: "claudius".to_owned(),
+                    body: "a later note".to_owned(),
+                },
+            ]
+        );
     }
 
     #[tokio::test]

@@ -222,7 +222,8 @@ env_file=/etc/$user.env
 if [[ -e $env_file ]]; then
     echo "$env_file already exists, leaving it alone"
 else
-    # No GitHub token here on purpose: the device flow puts it in the keyring.
+    # No GitHub token here on purpose: the device flow puts it in
+    # $HOME/.claudius-maximus/github-token, mode 0600.
     umask 077
     cat > "$env_file" <<EOF
 REPOS=$repos_for_env
