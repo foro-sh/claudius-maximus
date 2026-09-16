@@ -1,5 +1,9 @@
 # Claudius Maximus
 
+<p align="center">
+  <img src="assets/claudius-maximus.jpg" alt="Claudius Maximus" width="640">
+</p>
+
 A single long-running binary that continuously turns labeled GitHub issues into
 PRs using a Claude Code **subscription** (OAuth, not `ANTHROPIC_API_KEY`),
 plan-then-implement, to max out the rolling 5h usage window. No webhook, no
