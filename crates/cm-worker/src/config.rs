@@ -116,7 +116,9 @@ mod tests {
 
     #[test]
     fn parses_a_single_unrestricted_repo() {
-        let repos = parse_repos("foro-sh/claudius-maximus=/home/claudius-maximus/repos/claudius-maximus").unwrap();
+        let repos =
+            parse_repos("foro-sh/claudius-maximus=/home/claudius-maximus/repos/claudius-maximus")
+                .unwrap();
         assert_eq!(
             repos,
             vec![RepoEntry {
@@ -129,9 +131,10 @@ mod tests {
 
     #[test]
     fn parses_multiple_repos_with_an_author_allowlist() {
-        let repos =
-            parse_repos("foro-sh/claudius-maximus=/repos/claudius-maximus,foro-sh/foro=/repos/foro=alice|bob")
-                .unwrap();
+        let repos = parse_repos(
+            "foro-sh/claudius-maximus=/repos/claudius-maximus,foro-sh/foro=/repos/foro=alice|bob",
+        )
+        .unwrap();
         assert_eq!(repos.len(), 2);
         assert_eq!(repos[1].repo, "foro-sh/foro");
         assert_eq!(

@@ -653,9 +653,7 @@ mod tests {
         let client = client(&server).await;
         Mock::given(method("DELETE"))
             // octocrab percent-encodes the label name into the route.
-            .and(path(
-                "/repos/foro-sh/foro/issues/12/labels/cm%3Aplanning",
-            ))
+            .and(path("/repos/foro-sh/foro/issues/12/labels/cm%3Aplanning"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .expect(1)
             .mount(&server)
