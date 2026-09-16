@@ -1,3 +1,13 @@
+## [0.5.0](https://github.com/foro-sh/claudius-maximus/compare/v0.4.0...v0.5.0) (2026-09-16)
+
+### Features
+
+* provision an instance with add-instance.sh ([ead19a4](https://github.com/foro-sh/claudius-maximus/commit/ead19a457a230631b5fb5c4b6f5bc9f77624e9cc))
+
+### Bug Fixes
+
+* harden add-instance.sh against three sharp edges ([f429be9](https://github.com/foro-sh/claudius-maximus/commit/f429be9508786395f6718179088986195219908a))
+
 ## [0.4.0](https://github.com/foro-sh/claudius-maximus/compare/v0.3.0...v0.4.0) (2026-09-15)
 
 ### Features
