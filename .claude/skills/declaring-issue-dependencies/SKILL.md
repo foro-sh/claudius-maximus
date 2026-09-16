@@ -26,8 +26,7 @@ starves its whole subtree. When in doubt, leave the edge out.
 ## Workflow
 
 Declare edges in whichever repo the blocked issue lives in. CM drains every repo
-in its `$REPOS` list (`foro-sh/platform`, `foro-sh/foro`), so set
-`REPO=owner/name` before running the commands below. `blocked()` treats *any*
+in its `$REPOS` list, so set `REPO=owner/name` before running the commands below. `blocked()` treats *any*
 open entry the API returns for that issue as blocking, so whatever GitHub lists
 there is honoured.
 
