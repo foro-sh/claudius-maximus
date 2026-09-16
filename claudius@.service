@@ -8,8 +8,8 @@
 # the binary. Each user has its own $HOME, which is what scopes the
 # subscription OAuth credentials and the GitHub device-flow token
 # (~/.claudius-maximus/github-token) — that is the whole reason an instance is
-# a unix user and not just
-# another env file. `add-instance.sh` provisions one end to end.
+# a unix user and not just another env file. `add-instance.sh` provisions one
+# end to end.
 Description=Claudius (%i) — Claude Code GitHub issue worker (plan-then-implement, subscription OAuth)
 After=network-online.target
 Wants=network-online.target

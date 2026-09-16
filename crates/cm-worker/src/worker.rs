@@ -112,7 +112,7 @@ impl Worker<'_> {
                     "{}#{}: sweep error (continuing): {err:#}",
                     repo.repo, issue.number
                 ));
-                self.notifier.post(&format!(
+                self.notifier.post_once(&format!(
                     ":warning: {}#{} could not be processed — will retry — {}",
                     repo.repo,
                     issue.number,
@@ -248,7 +248,7 @@ or run git — output the plan text only.
                     "{}#{}: implement failed, will retry next sweep: {err:#}",
                     repo.repo, number
                 ));
-                self.notifier.post(&format!(
+                self.notifier.post_once(&format!(
                     ":warning: {}#{number} implement failed — will retry — {}",
                     repo.repo,
                     issue_url(&repo.repo, number)

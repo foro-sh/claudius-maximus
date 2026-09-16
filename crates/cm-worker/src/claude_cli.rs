@@ -66,8 +66,15 @@ impl Claude for ClaudeCli {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        // A write that failed against a run that still exited 0 means claude
+        // answered a prompt it only half read. The run is not trusted for
+        // that reason, but nothing it committed is lost: the next sweep tells
+        // it to reuse the same branch.
         match written {
-            Ok(result) => result.context("feeding claude its prompt")?,
+            Ok(result) => result.context(
+                "claude stopped reading before the whole prompt was in — it answered a \
+                 truncated prompt, so the run is being retried",
+            )?,
             Err(_) => anyhow::bail!("the thread feeding claude its prompt panicked"),
         }
 
