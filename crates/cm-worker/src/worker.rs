@@ -121,14 +121,14 @@ impl Worker<'_> {
             // repo for this sweep rather than spending a connect timeout per
             // issue in it.
             //
-            // ponytail: the branch name is hardcoded here and in `ship`'s PR
-            // base — every repo the worker serves is on `main`. Read it off
-            // origin's HEAD if that ever stops being true.
-            self.git
-                .sync_branch(&repo.clone_path, "main", self.token)
+            // The branch this lands on is origin's default, whatever it is
+            // called, and it is also the base the PR is opened against.
+            let base = self
+                .git
+                .sync_default(&repo.clone_path, self.token)
                 .with_context(|| format!("syncing {}", repo.repo))?;
 
-            if let Err(err) = self.act(repo, &issue, action).await {
+            if let Err(err) = self.act(repo, &issue, action, &base).await {
                 // Everything that fails inside `implement_issue` is reported
                 // there; what reaches here is a failure to plan, or to read
                 // the issue's own state. Both re-run every sweep, so neither
@@ -190,10 +190,16 @@ impl Worker<'_> {
         }))
     }
 
-    async fn act(&self, repo: &RepoEntry, issue: &Issue, action: Action) -> anyhow::Result<()> {
+    async fn act(
+        &self,
+        repo: &RepoEntry,
+        issue: &Issue,
+        action: Action,
+        base: &str,
+    ) -> anyhow::Result<()> {
         match action {
             Action::Plan => self.plan_issue(repo, issue).await,
-            Action::Implement => self.implement_issue(repo, issue).await,
+            Action::Implement => self.implement_issue(repo, issue, base).await,
         }
     }
 
@@ -250,7 +256,12 @@ or run git — output the plan text only.
         Ok(())
     }
 
-    async fn implement_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
+    async fn implement_issue(
+        &self,
+        repo: &RepoEntry,
+        issue: &Issue,
+        base: &str,
+    ) -> anyhow::Result<()> {
         let number = issue.number;
         // A plan comment that is gone — deleted, or never posted because the
         // label was applied by hand — cannot come back on its own, so failing
@@ -280,7 +291,7 @@ or run git — output the plan text only.
         // are on the branch, so the retry picks up where this left off. Every
         // one of those failures goes through here, so none of them is visible
         // only in the journal.
-        match self.implement_and_ship(repo, issue, &plan).await {
+        match self.implement_and_ship(repo, issue, &plan, base).await {
             Ok(url) => {
                 self.github
                     .add_label(&repo.repo, number, &self.done_label())
@@ -327,6 +338,7 @@ or run git — output the plan text only.
         repo: &RepoEntry,
         issue: &Issue,
         plan: &str,
+        base: &str,
     ) -> anyhow::Result<String> {
         let number = issue.number;
         let branch = branch_for(number);
@@ -343,7 +355,7 @@ or run git — output the plan text only.
 The issue and the plan already agreed for it are quoted below — they are all
 you get, since this box has no GitHub access of its own. Follow the plan;
 where it turns out to be wrong, say so in the commit messages.
-The clone was just synced with main and you have no credentials to fetch with,
+The clone was just synced with {base} and you have no credentials to fetch with,
 so work from it as it stands: check out branch {branch} (reuse it if it already
 exists), implement the change, run the test/lint commands from CLAUDE.md. Commit in many small,
 logically-scoped commits as you go — one per coherent step — rather than a
@@ -362,17 +374,23 @@ worker's job, and the box has no credentials for you to do it with.
                 fenced(plan)
             ),
         )?;
-        self.ship(repo, issue, &branch).await
+        self.ship(repo, issue, &branch, base).await
     }
 
     /// Push what Claude committed and open the PR. Returns the PR's URL.
-    async fn ship(&self, repo: &RepoEntry, issue: &Issue, branch: &str) -> anyhow::Result<String> {
+    async fn ship(
+        &self,
+        repo: &RepoEntry,
+        issue: &Issue,
+        branch: &str,
+        base: &str,
+    ) -> anyhow::Result<String> {
         self.git.push(&repo.clone_path, branch, self.token)?;
         self.github
             .create_pull_request(
                 &repo.repo,
                 branch,
-                "main",
+                base,
                 &issue.title,
                 &format!(
                     "Closes #{}\n\n---\n:crown: Implemented by {}.",
@@ -1111,11 +1129,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_pr_is_opened_against_origins_default_branch_whatever_it_is_called() {
+        let config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        let github = FakeGithub::new(vec![
+            FakeIssue::new(
+                "foro-sh/foro",
+                7,
+                "danielsteman",
+                &[LABEL, &format!("{LABEL}:planned")],
+            )
+            .with_comment(&plan_comment("Claudius Maximus", LABEL)),
+        ]);
+        let claude = FakeClaude::default();
+        let notifier = Notifier::new(None, config.instance.clone());
+
+        Worker {
+            config: &config,
+            github: &github,
+            git: &FakeGit::with_default("trunk"),
+            claude: &claude,
+            notifier: &notifier,
+            token: "fake-token",
+        }
+        .sweep()
+        .await;
+
+        assert!(
+            github
+                .calls()
+                .iter()
+                .any(|call| call.contains("create_pr") && call.contains("base=trunk")),
+            "a PR aimed at `main` would be refused by a repo on `trunk`: {:?}",
+            github.calls()
+        );
+        assert!(
+            claude.prompts()[0].contains("synced with trunk"),
+            "the implementing run is told which branch it is starting from: {}",
+            claude.prompts()[0]
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
         struct UnpushableGit;
         impl GitOps for UnpushableGit {
-            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
-                Ok(())
+            fn sync_default(&self, _: &std::path::Path, _: &str) -> anyhow::Result<String> {
+                Ok("main".to_string())
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 anyhow::bail!("origin rejected the push")
@@ -1391,16 +1454,15 @@ mod tests {
         // for the next sweep rather than spending a connect timeout per issue.
         struct SelectivelyFailingGit;
         impl GitOps for SelectivelyFailingGit {
-            fn sync_branch(
+            fn sync_default(
                 &self,
                 clone_path: &std::path::Path,
                 _: &str,
-                _: &str,
-            ) -> anyhow::Result<()> {
+            ) -> anyhow::Result<String> {
                 if clone_path.ends_with("platform") {
                     anyhow::bail!("origin unreachable")
                 }
-                Ok(())
+                Ok("main".to_string())
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 Ok(())
@@ -1468,8 +1530,8 @@ mod tests {
         assert_eq!(
             harness.git.calls(),
             vec![
-                "sync_branch path=/clones/foro branch=main".to_string(),
-                "sync_branch path=/clones/foro branch=main".to_string(),
+                "sync_default path=/clones/foro".to_string(),
+                "sync_default path=/clones/foro".to_string(),
             ],
             "an implementing run leaves HEAD on its own branch, so the next \
              issue is synced again rather than branching off it"

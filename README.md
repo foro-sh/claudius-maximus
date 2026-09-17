@@ -366,16 +366,18 @@ Every repo in `$REPOS` needs all of these:
 
 - A `CLAUDE.md` documenting branch convention, test/lint commands, and "do not
   merge — human review required". The worker tells Claude to follow it.
-- Branch protection on `main`: PR required; Claude only pushes `claude/*`.
+- Branch protection on the default branch: PR required; Claude only pushes
+  `claude/*`. The worker reads that branch off origin's HEAD, so a repo on
+  `trunk` or `master` needs no configuration.
 - The three labels (`$LABEL`, `:planned`, `:done`). **Per instance**: a second
   instance needs its own triad, since the label is what keeps the two queues
   from colliding.
 - An author allowlist in `$REPOS` if the repo is public, so a stranger's issue
   can't become a Claude prompt.
-- A clone on the box at the path given in `$REPOS`, with `main` checked out and
-  an `origin` the bot can fetch. **Per instance** — two workers must never share
-  a working tree. `add-instance.sh` clones over anonymous HTTPS, so a **private**
-  repo has to be cloned by hand as that unix user, with credentials of your
+- A clone on the box at the path given in `$REPOS`, with an `origin` the bot
+  can fetch. **Per instance** — two workers must never share a working tree.
+  `add-instance.sh` clones over anonymous HTTPS, so a **private** repo has to
+  be cloned by hand as that unix user, with credentials of your
   choosing — the worker's own token only arrives later, at the device flow.
   From then on the worker fetches and pushes with that token, so the clone needs
   no stored credential of its own. **`origin` must be an HTTPS URL**: the token

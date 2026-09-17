@@ -14,12 +14,16 @@ use git2::{
 /// clone and pushes the finished branch, which is the half that needs the
 /// instance's OAuth token.
 pub trait GitOps: Send + Sync {
-    /// Fetch `origin` and hard-reset `branch` to `origin/<default branch>`,
-    /// creating the local branch if it doesn't exist yet. Equivalent of
-    /// `worker.sh`'s `git fetch && git checkout <branch> && git reset --hard`.
+    /// Fetch `origin`, hard-reset the local copy of origin's default branch
+    /// onto it, check it out, and return that branch's name. Equivalent of
+    /// `worker.sh`'s `git fetch && git checkout <default> && git reset --hard`.
     /// Authenticated with `token`, like [`GitOps::push`]: the repos the worker
     /// serves are private, so an anonymous fetch never sees them.
-    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> anyhow::Result<()>;
+    ///
+    /// The name comes back rather than going in: it is also the base every PR
+    /// is opened against, and a repo whose default is not `main` would
+    /// otherwise get a PR aimed at a branch that does not exist.
+    fn sync_default(&self, clone_path: &Path, token: &str) -> anyhow::Result<String>;
 
     /// Push `branch` to `origin` over HTTPS, authenticated with `token`
     /// (the same OAuth token `cm-github`'s client holds).
@@ -32,7 +36,7 @@ pub trait GitOps: Send + Sync {
 pub struct Git2Ops;
 
 impl GitOps for Git2Ops {
-    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
+    fn sync_default(&self, clone_path: &Path, token: &str) -> Result<String> {
         let repo = Repository::open(clone_path)?;
         let mut remote = repo.find_remote("origin")?;
 
@@ -65,12 +69,12 @@ impl GitOps for Git2Ops {
         // refuses to force a branch that is already HEAD — the common case
         // here, since the worker re-syncs a branch it is already sitting on.
         repo.reference(
-            &format!("refs/heads/{branch}"),
+            &format!("refs/heads/{default}"),
             upstream.id(),
             true,
-            "sync_branch",
+            "sync_default",
         )?;
-        repo.set_head(&format!("refs/heads/{branch}"))?;
+        repo.set_head(&format!("refs/heads/{default}"))?;
         // The checkout is what clears untracked files, which a plain
         // `reset --hard` leaves behind: the worker reuses one clone across
         // issues, so whatever a killed Claude run dropped in the tree would
@@ -82,7 +86,7 @@ impl GitOps for Git2Ops {
         checkout.force().remove_untracked(true);
         repo.checkout_tree(upstream.as_object(), Some(&mut checkout))?;
         repo.reset(upstream.as_object(), ResetType::Hard, None)?;
-        Ok(())
+        Ok(default)
     }
 
     fn push(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
@@ -164,14 +168,24 @@ mod tests {
         (tmp, clone)
     }
 
+    /// Checks out `branch` off HEAD in `clone` — what a Claude run does inside
+    /// the synced clone before it commits anything.
+    fn branch_off_head(clone: &Path, branch: &str) {
+        let repo = Repository::open(clone).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch(branch, &head, true).unwrap();
+        repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+    }
+
     #[test]
-    fn sync_branch_creates_branch_off_the_detected_default() {
-        // Deliberately not `main`: the default branch has to be detected.
+    fn sync_default_checks_out_the_detected_default_branch() {
+        // Deliberately not `main`: the default branch has to be detected, and
+        // its name is what every PR is opened against.
         let (_tmp, clone) = fixture("trunk");
-        Git2Ops.sync_branch(&clone, "cm/issue-1", TOKEN).unwrap();
+        assert_eq!(Git2Ops.sync_default(&clone, TOKEN).unwrap(), "trunk");
 
         let repo = Repository::open(&clone).unwrap();
-        assert_eq!(repo.head().unwrap().shorthand(), Some("cm/issue-1"));
+        assert_eq!(repo.head().unwrap().shorthand(), Some("trunk"));
         assert_eq!(
             repo.head().unwrap().peel_to_commit().unwrap().id(),
             repo.find_branch("origin/trunk", BranchType::Remote)
@@ -184,9 +198,9 @@ mod tests {
     }
 
     #[test]
-    fn sync_branch_reuses_the_branch_and_throws_away_local_work() {
+    fn sync_default_throws_away_local_work() {
         let (_tmp, clone) = fixture("main");
-        Git2Ops.sync_branch(&clone, "cm/issue-2", TOKEN).unwrap();
+        Git2Ops.sync_default(&clone, TOKEN).unwrap();
 
         fs::write(clone.join("README.md"), "scribbled over\n").unwrap();
         fs::write(clone.join("junk.txt"), "tracked junk\n").unwrap();
@@ -194,10 +208,10 @@ mod tests {
         fs::create_dir_all(clone.join("leftovers")).unwrap();
         fs::write(clone.join("leftovers/scratch.txt"), "never staged\n").unwrap();
 
-        Git2Ops.sync_branch(&clone, "cm/issue-2", TOKEN).unwrap();
+        assert_eq!(Git2Ops.sync_default(&clone, TOKEN).unwrap(), "main");
 
         let repo = Repository::open(&clone).unwrap();
-        assert_eq!(repo.head().unwrap().shorthand(), Some("cm/issue-2"));
+        assert_eq!(repo.head().unwrap().shorthand(), Some("main"));
         assert_eq!(
             fs::read_to_string(clone.join("README.md")).unwrap(),
             "seed\n"
@@ -221,7 +235,8 @@ mod tests {
         drop(repo);
 
         let branch = format!("cm/push-test-{}", std::process::id());
-        Git2Ops.sync_branch(&clone, &branch, &token).unwrap();
+        Git2Ops.sync_default(&clone, &token).unwrap();
+        branch_off_head(&clone, &branch);
         fs::write(clone.join("push-test.txt"), "hello\n").unwrap();
         commit_all(&Repository::open(&clone).unwrap(), "test: push smoke test");
         Git2Ops.push(&clone, &branch, &token).unwrap();
