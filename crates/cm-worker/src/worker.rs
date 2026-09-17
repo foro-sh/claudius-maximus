@@ -20,6 +20,7 @@ use anyhow::Context;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue};
 
+use crate::backoff::Backoff;
 use crate::claude_cli::Claude;
 use crate::config::{Config, RepoEntry};
 use crate::notify::Notifier;
@@ -37,6 +38,8 @@ pub struct Worker<'a> {
     pub git: &'a dyn GitOps,
     pub claude: &'a dyn Claude,
     pub notifier: &'a Notifier,
+    /// How long each repeatedly-failing issue is being left alone for.
+    pub backoff: &'a Backoff,
     /// The instance's OAuth token, for pushing `claude/issue-N` over HTTPS.
     pub token: &'a str,
 }
@@ -102,6 +105,16 @@ impl Worker<'_> {
                 ));
                 continue;
             }
+            // An issue that failed recently is left alone until its backoff
+            // is up: the retry is a whole Claude run, and one stuck issue
+            // retried every sweep spends the quota the rest of the backlog
+            // needs. Checked before the two API calls `action_for` costs.
+            if self
+                .backoff
+                .resting(&issue_failure_key(&repo.repo, issue.number))
+            {
+                continue;
+            }
             // What to do with it — and whether there is anything to do at all
             // — is decided before the clone is touched: most of a backlog is
             // usually blocked or done, and syncing for those costs two TLS
@@ -119,16 +132,18 @@ impl Worker<'_> {
             // may still be sitting on the last issue's branch — and every
             // other issue in this repo would fail the same way. Abandon the
             // repo for this sweep rather than spending a connect timeout per
-            // issue in it.
+            // issue in it. A repo that isn't on the box at all is cloned here,
+            // with the instance's own token: it is the only credential on the
+            // box that reaches a private repo.
             //
-            // ponytail: the branch name is hardcoded here and in `ship`'s PR
-            // base — every repo the worker serves is on `main`. Read it off
-            // origin's HEAD if that ever stops being true.
-            self.git
-                .sync_branch(&repo.clone_path, "main", self.token)
+            // The branch this lands on is origin's default, whatever it is
+            // called, and it is also the base the PR is opened against.
+            let base = self
+                .git
+                .sync_default(&repo.clone_path, &clone_url(&repo.repo), self.token)
                 .with_context(|| format!("syncing {}", repo.repo))?;
 
-            if let Err(err) = self.act(repo, &issue, action).await {
+            if let Err(err) = self.act(repo, &issue, action, &base).await {
                 // Everything that fails inside `implement_issue` is reported
                 // there; what reaches here is a failure to plan, or to read
                 // the issue's own state. Both re-run every sweep, so neither
@@ -147,9 +162,14 @@ impl Worker<'_> {
     /// Everything that fails around one issue is said once per issue, and said
     /// again after the next success there.
     fn report_issue_failure(&self, repo: &RepoEntry, number: u64, err: &anyhow::Error) {
+        let resting_for = self.backoff.record_failure(
+            &issue_failure_key(&repo.repo, number),
+            self.config.poll_interval,
+        );
         self.log(&format!(
-            "{}#{number}: sweep error (continuing): {err:#}",
-            repo.repo
+            "{}#{number}: sweep error (leaving it alone for {}s): {err:#}",
+            repo.repo,
+            resting_for.as_secs()
         ));
         self.notifier.post_once(
             &issue_failure_key(&repo.repo, number),
@@ -190,10 +210,16 @@ impl Worker<'_> {
         }))
     }
 
-    async fn act(&self, repo: &RepoEntry, issue: &Issue, action: Action) -> anyhow::Result<()> {
+    async fn act(
+        &self,
+        repo: &RepoEntry,
+        issue: &Issue,
+        action: Action,
+        base: &str,
+    ) -> anyhow::Result<()> {
         match action {
             Action::Plan => self.plan_issue(repo, issue).await,
-            Action::Implement => self.implement_issue(repo, issue).await,
+            Action::Implement => self.implement_issue(repo, issue, base).await,
         }
     }
 
@@ -242,6 +268,7 @@ or run git — output the plan text only.
         // earlier sweep failure on it is no longer the current state.
         self.notifier.forget(&issue_failure_key(&repo.repo, number));
         self.notifier.forget(&repo_failure_key(&repo.repo));
+        self.backoff.forget(&issue_failure_key(&repo.repo, number));
         self.notifier.post(&format!(
             ":scroll: planned {}#{number} — implementing next sweep — {}",
             repo.repo,
@@ -250,7 +277,12 @@ or run git — output the plan text only.
         Ok(())
     }
 
-    async fn implement_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
+    async fn implement_issue(
+        &self,
+        repo: &RepoEntry,
+        issue: &Issue,
+        base: &str,
+    ) -> anyhow::Result<()> {
         let number = issue.number;
         // A plan comment that is gone — deleted, or never posted because the
         // label was applied by hand — cannot come back on its own, so failing
@@ -280,7 +312,7 @@ or run git — output the plan text only.
         // are on the branch, so the retry picks up where this left off. Every
         // one of those failures goes through here, so none of them is visible
         // only in the journal.
-        match self.implement_and_ship(repo, issue, &plan).await {
+        match self.implement_and_ship(repo, issue, &plan, base).await {
             Ok(url) => {
                 self.github
                     .add_label(&repo.repo, number, &self.done_label())
@@ -294,15 +326,22 @@ or run git — output the plan text only.
                 // and for the repo, which is evidently reachable.
                 self.notifier.forget(&issue_failure_key(&repo.repo, number));
                 self.notifier.forget(&repo_failure_key(&repo.repo));
+                self.backoff.forget(&issue_failure_key(&repo.repo, number));
                 self.notifier.post(&format!(
                     ":white_check_mark: shipped {}#{number} — {url}",
                     repo.repo
                 ));
             }
             Err(err) => {
+                let resting_for = self.backoff.record_failure(
+                    &issue_failure_key(&repo.repo, number),
+                    self.config.poll_interval,
+                );
                 self.log(&format!(
-                    "{}#{}: implement failed, will retry next sweep: {err:#}",
-                    repo.repo, number
+                    "{}#{}: implement failed, retrying in {}s: {err:#}",
+                    repo.repo,
+                    number,
+                    resting_for.as_secs()
                 ));
                 self.notifier.post_once(
                     // Keyed on the issue and the stage, not on the error: the
@@ -327,6 +366,7 @@ or run git — output the plan text only.
         repo: &RepoEntry,
         issue: &Issue,
         plan: &str,
+        base: &str,
     ) -> anyhow::Result<String> {
         let number = issue.number;
         let branch = branch_for(number);
@@ -343,7 +383,7 @@ or run git — output the plan text only.
 The issue and the plan already agreed for it are quoted below — they are all
 you get, since this box has no GitHub access of its own. Follow the plan;
 where it turns out to be wrong, say so in the commit messages.
-The clone was just synced with main and you have no credentials to fetch with,
+The clone was just synced with {base} and you have no credentials to fetch with,
 so work from it as it stands: check out branch {branch} (reuse it if it already
 exists), implement the change, run the test/lint commands from CLAUDE.md. Commit in many small,
 logically-scoped commits as you go — one per coherent step — rather than a
@@ -362,17 +402,32 @@ worker's job, and the box has no credentials for you to do it with.
                 fenced(plan)
             ),
         )?;
-        self.ship(repo, issue, &branch).await
+        // A run that committed nothing has no pull request in it. Pushing
+        // anyway gets GitHub's "no commits between" 422, which reads like a
+        // broken worker rather than like the one thing that actually happened.
+        if !self.git.has_new_commits(&repo.clone_path, &branch, base)? {
+            anyhow::bail!(
+                "claude committed nothing to {branch} — nothing to open a pull request with, \
+                 retrying next sweep"
+            );
+        }
+        self.ship(repo, issue, &branch, base).await
     }
 
     /// Push what Claude committed and open the PR. Returns the PR's URL.
-    async fn ship(&self, repo: &RepoEntry, issue: &Issue, branch: &str) -> anyhow::Result<String> {
+    async fn ship(
+        &self,
+        repo: &RepoEntry,
+        issue: &Issue,
+        branch: &str,
+        base: &str,
+    ) -> anyhow::Result<String> {
         self.git.push(&repo.clone_path, branch, self.token)?;
         self.github
             .create_pull_request(
                 &repo.repo,
                 branch,
-                "main",
+                base,
                 &issue.title,
                 &format!(
                     "Closes #{}\n\n---\n:crown: Implemented by {}.",
@@ -467,6 +522,12 @@ worker's job, and the box has no credentials for you to do it with.
     fn log(&self, message: &str) {
         println!("{}: {message}", self.config.instance);
     }
+}
+
+/// Where a repo is cloned from. HTTPS, because the token is the only
+/// credential the worker has and an SSH remote would ask it for a key.
+fn clone_url(repo: &str) -> String {
+    format!("https://github.com/{repo}.git")
 }
 
 /// Names the repo as a whole for [`Notifier::post_once`]: listing its issues
@@ -612,6 +673,7 @@ mod tests {
         claude: FakeClaude,
         config: Config,
         notifier: Notifier,
+        backoff: Backoff,
     }
 
     impl Harness {
@@ -621,6 +683,7 @@ mod tests {
                 git: FakeGit::default(),
                 claude,
                 notifier: Notifier::new(None, config.instance.clone()),
+                backoff: Backoff::default(),
                 config,
             }
         }
@@ -632,6 +695,7 @@ mod tests {
                 git: &self.git,
                 claude: &self.claude,
                 notifier: &self.notifier,
+                backoff: &self.backoff,
                 token: "fake-token",
             }
             .sweep()
@@ -1111,11 +1175,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_pr_is_opened_against_origins_default_branch_whatever_it_is_called() {
+        let config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        let github = FakeGithub::new(vec![
+            FakeIssue::new(
+                "foro-sh/foro",
+                7,
+                "danielsteman",
+                &[LABEL, &format!("{LABEL}:planned")],
+            )
+            .with_comment(&plan_comment("Claudius Maximus", LABEL)),
+        ]);
+        let claude = FakeClaude::default();
+        let notifier = Notifier::new(None, config.instance.clone());
+
+        Worker {
+            config: &config,
+            github: &github,
+            git: &FakeGit::with_default("trunk"),
+            claude: &claude,
+            notifier: &notifier,
+            backoff: &Backoff::default(),
+            token: "fake-token",
+        }
+        .sweep()
+        .await;
+
+        assert!(
+            github
+                .calls()
+                .iter()
+                .any(|call| call.contains("create_pr") && call.contains("base=trunk")),
+            "a PR aimed at `main` would be refused by a repo on `trunk`: {:?}",
+            github.calls()
+        );
+        assert!(
+            claude.prompts()[0].contains("synced with trunk"),
+            "the implementing run is told which branch it is starting from: {}",
+            claude.prompts()[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_commits_nothing_opens_no_pull_request() {
+        // Pushing the branch anyway earns GitHub's "no commits between" 422,
+        // which reads as a broken worker rather than as an empty run.
+        struct CommitlessGit;
+        impl GitOps for CommitlessGit {
+            fn sync_default(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<String> {
+                Ok("main".to_string())
+            }
+            fn has_new_commits(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn push(&self, _: &std::path::Path, branch: &str, _: &str) -> anyhow::Result<()> {
+                panic!("pushed {branch} with nothing on it")
+            }
+        }
+
+        let config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        let github = FakeGithub::new(vec![
+            FakeIssue::new(
+                "foro-sh/foro",
+                7,
+                "danielsteman",
+                &[LABEL, &format!("{LABEL}:planned")],
+            )
+            .with_comment(&plan_comment("Claudius Maximus", LABEL)),
+        ]);
+        let notifier = Notifier::new(None, config.instance.clone());
+
+        Worker {
+            config: &config,
+            github: &github,
+            git: &CommitlessGit,
+            claude: &FakeClaude::default(),
+            notifier: &notifier,
+            backoff: &Backoff::default(),
+            token: "fake-token",
+        }
+        .sweep()
+        .await;
+
+        assert!(github.pulls().is_empty());
+        assert_eq!(
+            github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string(), format!("{LABEL}:planned")],
+            "the trigger label stays on, so the next sweep runs claude again"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_issue_that_just_failed_is_not_retried_on_the_very_next_sweep() {
+        // The retry is a whole Claude run. One issue that fails every time
+        // would otherwise spend the quota the rest of the backlog needs,
+        // every sweep, forever.
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::failing_for(&["foro"]),
+        );
+
+        harness.sweep().await;
+        harness.sweep().await;
+
+        assert_eq!(
+            harness.claude.runs().len(),
+            1,
+            "the second sweep is inside the first failure's backoff"
+        );
+        assert_eq!(
+            harness.github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string()],
+            "the trigger label stays on, so the issue comes back when the backoff is up"
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
         struct UnpushableGit;
         impl GitOps for UnpushableGit {
-            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
-                Ok(())
+            fn sync_default(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<String> {
+                Ok("main".to_string())
+            }
+            fn has_new_commits(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<bool> {
+                Ok(true)
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 anyhow::bail!("origin rejected the push")
@@ -1144,6 +1360,7 @@ mod tests {
             git: &UnpushableGit,
             claude: &FakeClaude::default(),
             notifier: &notifier,
+            backoff: &Backoff::default(),
             token: "fake-token",
         }
         .sweep()
@@ -1391,16 +1608,24 @@ mod tests {
         // for the next sweep rather than spending a connect timeout per issue.
         struct SelectivelyFailingGit;
         impl GitOps for SelectivelyFailingGit {
-            fn sync_branch(
+            fn sync_default(
                 &self,
                 clone_path: &std::path::Path,
                 _: &str,
                 _: &str,
-            ) -> anyhow::Result<()> {
+            ) -> anyhow::Result<String> {
                 if clone_path.ends_with("platform") {
                     anyhow::bail!("origin unreachable")
                 }
-                Ok(())
+                Ok("main".to_string())
+            }
+            fn has_new_commits(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<bool> {
+                Ok(true)
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 Ok(())
@@ -1429,6 +1654,7 @@ mod tests {
             git: &SelectivelyFailingGit,
             claude: &claude,
             notifier: &notifier,
+            backoff: &Backoff::default(),
             token: "fake-token",
         }
         .sweep()
@@ -1468,8 +1694,10 @@ mod tests {
         assert_eq!(
             harness.git.calls(),
             vec![
-                "sync_branch path=/clones/foro branch=main".to_string(),
-                "sync_branch path=/clones/foro branch=main".to_string(),
+                "sync_default path=/clones/foro url=https://github.com/foro-sh/foro.git"
+                    .to_string(),
+                "sync_default path=/clones/foro url=https://github.com/foro-sh/foro.git"
+                    .to_string(),
             ],
             "an implementing run leaves HEAD on its own branch, so the next \
              issue is synced again rather than branching off it"

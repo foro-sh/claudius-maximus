@@ -11,7 +11,18 @@
     ],
     ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
     ["@semantic-release/changelog", { "changelogFile": "CHANGELOG.md" }],
-    "@semantic-release/github",
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          {
+            "path": "target/x86_64-unknown-linux-musl/release/claudius-maximus",
+            "name": "claudius-maximus-linux-x86_64",
+            "label": "claudius-maximus ${nextRelease.version} (linux x86_64, static)"
+          }
+        ]
+      }
+    ],
     [
       "@semantic-release/git",
       {

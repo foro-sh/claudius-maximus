@@ -246,24 +246,54 @@ impl GithubClient for FakeGithub {
     }
 }
 
-#[derive(Default)]
+/// A git that always syncs, and whose clones always carry the commits a
+/// Claude run was supposed to make. `with_default` names origin's default
+/// branch, which is what every PR is opened against.
 pub struct FakeGit {
     calls: Mutex<Vec<String>>,
+    default_branch: String,
+}
+
+impl Default for FakeGit {
+    fn default() -> Self {
+        FakeGit::with_default("main")
+    }
 }
 
 impl FakeGit {
+    pub fn with_default(branch: &str) -> Self {
+        FakeGit {
+            calls: Mutex::new(Vec::new()),
+            default_branch: branch.to_string(),
+        }
+    }
+
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
 }
 
 impl GitOps for FakeGit {
-    fn sync_branch(&self, clone_path: &Path, branch: &str, _token: &str) -> anyhow::Result<()> {
+    fn sync_default(
+        &self,
+        clone_path: &Path,
+        remote_url: &str,
+        _token: &str,
+    ) -> anyhow::Result<String> {
         self.calls.lock().unwrap().push(format!(
-            "sync_branch path={} branch={branch}",
+            "sync_default path={} url={remote_url}",
             clone_path.display()
         ));
-        Ok(())
+        Ok(self.default_branch.clone())
+    }
+
+    fn has_new_commits(
+        &self,
+        _clone_path: &Path,
+        _branch: &str,
+        _base: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(true)
     }
 
     fn push(&self, clone_path: &Path, branch: &str, _token: &str) -> anyhow::Result<()> {

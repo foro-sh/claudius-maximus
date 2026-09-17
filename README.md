@@ -98,14 +98,13 @@ npm install -g @anthropic-ai/claude-code
 claude login && claude doctor
 unset ANTHROPIC_API_KEY            # and remove it from any profile/env
 
-# 2. Clone every target repo (one clone per entry in $REPOS).
-git clone https://github.com/foro-sh/claudius-maximus.git /home/claudius-maximus/repos/claudius-maximus
-git clone https://github.com/foro-sh/foro.git     /home/claudius-maximus/repos/foro
-
-# 3. Drop the binary in place.
+# 2. Drop the binary in place. (The clones are the worker's own job — it
+#    makes them on its first sweep, with its own token.)
 mkdir -p /home/claudius-maximus/claudius-maximus
-# ...scp target/release/claudius-maximus here, then:
-chmod +x /home/claudius-maximus/claudius-maximus/claudius-maximus
+cd /home/claudius-maximus/claudius-maximus
+curl -fsSLo claudius-maximus \
+  https://github.com/foro-sh/claudius-maximus/releases/latest/download/claudius-maximus-linux-x86_64
+chmod +x claudius-maximus     # or scp your own target/release/claudius-maximus here
 ```
 
 **GitHub login is the binary's own job.** On first run it starts GitHub's OAuth
@@ -255,12 +254,16 @@ its own device-flow login for GitHub.
 
 ### Setup
 
-`add-instance.sh` does the mechanical half — the unix user, its clones, its env
-file, the unit — and prints the rest. Run it as root from a checkout, once per
+`add-instance.sh` does the mechanical half — the unix user, its env file, the
+unit — and prints the rest. Run it as root from a checkout, once per
 subscription. With no name argument it takes the next free slot from the ordinal
 list; pass a known name explicitly only to re-run / repair that slot.
 
 ```bash
+# Every release carries a static linux/x86_64 binary; grab that instead of
+# building if the box has no Rust toolchain:
+#   curl -fsSLo claudius-maximus https://github.com/foro-sh/claudius-maximus/releases/latest/download/claudius-maximus-linux-x86_64
+#   chmod +x claudius-maximus && export CLAUDIUS_BINARY=$PWD/claudius-maximus
 cargo build --release
 sudo env REPOS=foro-sh/claudius-maximus \
          GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx \
@@ -282,8 +285,8 @@ clone path, a label another instance's env file already claims, or a clone path
 outside the new user's `$HOME` all abort with nothing written. That last one is
 not a style rule — two workers sharing a working tree both check out branches and
 hard-reset onto origin's default, and one tree corrupts the other. Re-running a
-named slot is safe; an existing user, clone or env file is left alone. A plain
-re-run with no args provisions the *next* free name.
+named slot is safe; an existing user or env file is left alone. A plain re-run
+with no args provisions the *next* free name.
 
 `PLAN_MODEL`, `PLAN_EFFORT`, `IMPLEMENT_MODEL`, `IMPLEMENT_EFFORT`,
 `POLL_INTERVAL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` are passed
@@ -366,20 +369,21 @@ Every repo in `$REPOS` needs all of these:
 
 - A `CLAUDE.md` documenting branch convention, test/lint commands, and "do not
   merge — human review required". The worker tells Claude to follow it.
-- Branch protection on `main`: PR required; Claude only pushes `claude/*`.
+- Branch protection on the default branch: PR required; Claude only pushes
+  `claude/*`. The worker reads that branch off origin's HEAD, so a repo on
+  `trunk` or `master` needs no configuration.
 - The three labels (`$LABEL`, `:planned`, `:done`). **Per instance**: a second
   instance needs its own triad, since the label is what keeps the two queues
   from colliding.
 - An author allowlist in `$REPOS` if the repo is public, so a stranger's issue
   can't become a Claude prompt.
-- A clone on the box at the path given in `$REPOS`, with `main` checked out and
-  an `origin` the bot can fetch. **Per instance** — two workers must never share
-  a working tree. `add-instance.sh` clones over anonymous HTTPS, so a **private**
-  repo has to be cloned by hand as that unix user, with credentials of your
-  choosing — the worker's own token only arrives later, at the device flow.
-  From then on the worker fetches and pushes with that token, so the clone needs
-  no stored credential of its own. **`origin` must be an HTTPS URL**: the token
-  is all the worker offers, and an SSH remote would ask it for a key it does not
+- Nothing else. The worker clones the repo itself on its first sweep, at the
+  path given in `$REPOS`, using its own token — which is what makes a private
+  repo work without a credential stored on the box. **Per instance** — two
+  workers must never share a working tree, and a `$REPOS` path that exists but
+  holds no clone is refused rather than cloned over. An existing clone is
+  reused as it stands, and its `origin` **must be an HTTPS URL**: the token is
+  all the worker offers, and an SSH remote would ask it for a key it does not
   have.
 
 ## Known ceilings
@@ -416,7 +420,13 @@ Every repo in `$REPOS` needs all of these:
   also implementing it.
 - **`--dangerously-skip-permissions`** during implement — acceptable on an
   isolated, unprivileged box; tighten with a `settings.json` allowlist otherwise.
-- **Retry on failure is whole-issue.** A failed implement re-runs next sweep;
-  Claude is told to reuse the existing branch/PR rather than duplicate it.
+- **Retry on failure is whole-issue, and backs off.** A failed implement
+  re-runs; Claude is told to reuse the existing branch/PR rather than duplicate
+  it. The wait doubles per consecutive failure on the same issue — one
+  `$POLL_INTERVAL`, then two, up to 64 — because the retry is a whole Claude
+  run and one permanently stuck issue would otherwise spend the quota the rest
+  of the backlog needs. Any success on that issue resets it, and so does
+  restarting the worker: the counters are in memory, GitHub holds the state
+  that matters.
 - **Mattermost messages are controlled text** (no issue titles), so nothing
   richer than a fixed line per transition is posted.

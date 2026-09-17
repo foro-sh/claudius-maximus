@@ -4,9 +4,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use git2::build::CheckoutBuilder;
+use git2::build::{CheckoutBuilder, RepoBuilder};
 use git2::{
-    BranchType, Cred, Direction, FetchOptions, PushOptions, RemoteCallbacks, Repository, ResetType,
+    BranchType, Cred, Direction, ErrorCode, FetchOptions, PushOptions, RemoteCallbacks, Repository,
+    ResetType,
 };
 
 /// Everything the worker needs from git — no `git` CLI, per #1. Claude makes
@@ -14,26 +15,43 @@ use git2::{
 /// clone and pushes the finished branch, which is the half that needs the
 /// instance's OAuth token.
 pub trait GitOps: Send + Sync {
-    /// Fetch `origin` and hard-reset `branch` to `origin/<default branch>`,
-    /// creating the local branch if it doesn't exist yet. Equivalent of
-    /// `worker.sh`'s `git fetch && git checkout <branch> && git reset --hard`.
+    /// Fetch `origin`, hard-reset the local copy of origin's default branch
+    /// onto it, check it out, and return that branch's name. Equivalent of
+    /// `worker.sh`'s `git fetch && git checkout <default> && git reset --hard`.
     /// Authenticated with `token`, like [`GitOps::push`]: the repos the worker
     /// serves are private, so an anonymous fetch never sees them.
-    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> anyhow::Result<()>;
+    ///
+    /// Clones `remote_url` first if there is nothing at `clone_path` yet. The
+    /// worker's own token is the only credential on the box that reaches a
+    /// private repo, so the first clone belongs here rather than in whatever
+    /// provisioned the instance.
+    ///
+    /// The branch name comes back rather than going in: it is also the base
+    /// every PR is opened against, and a repo whose default is not `main`
+    /// would otherwise get a PR aimed at a branch that does not exist.
+    fn sync_default(
+        &self,
+        clone_path: &Path,
+        remote_url: &str,
+        token: &str,
+    ) -> anyhow::Result<String>;
+
+    /// True if `branch` exists locally and carries commits `base` does not.
+    /// False for a branch that was never created — a Claude run that committed
+    /// nothing leaves one or the other, and neither is a pull request.
+    fn has_new_commits(&self, clone_path: &Path, branch: &str, base: &str) -> anyhow::Result<bool>;
 
     /// Push `branch` to `origin` over HTTPS, authenticated with `token`
     /// (the same OAuth token `cm-github`'s client holds).
     fn push(&self, clone_path: &Path, branch: &str, token: &str) -> anyhow::Result<()>;
 }
 
-/// `GitOps` on top of vendored libgit2. `clone_path` is always an existing
-/// checked-out clone with an `origin` remote — the initial clone happens
-/// elsewhere.
+/// `GitOps` on top of vendored libgit2.
 pub struct Git2Ops;
 
 impl GitOps for Git2Ops {
-    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
-        let repo = Repository::open(clone_path)?;
+    fn sync_default(&self, clone_path: &Path, remote_url: &str, token: &str) -> Result<String> {
+        let repo = open_or_clone(clone_path, remote_url, token)?;
         let mut remote = repo.find_remote("origin")?;
 
         // `default_branch` only answers once the remote is connected, so
@@ -65,12 +83,12 @@ impl GitOps for Git2Ops {
         // refuses to force a branch that is already HEAD — the common case
         // here, since the worker re-syncs a branch it is already sitting on.
         repo.reference(
-            &format!("refs/heads/{branch}"),
+            &format!("refs/heads/{default}"),
             upstream.id(),
             true,
-            "sync_branch",
+            "sync_default",
         )?;
-        repo.set_head(&format!("refs/heads/{branch}"))?;
+        repo.set_head(&format!("refs/heads/{default}"))?;
         // The checkout is what clears untracked files, which a plain
         // `reset --hard` leaves behind: the worker reuses one clone across
         // issues, so whatever a killed Claude run dropped in the tree would
@@ -82,7 +100,26 @@ impl GitOps for Git2Ops {
         checkout.force().remove_untracked(true);
         repo.checkout_tree(upstream.as_object(), Some(&mut checkout))?;
         repo.reset(upstream.as_object(), ResetType::Hard, None)?;
-        Ok(())
+        Ok(default)
+    }
+
+    fn has_new_commits(&self, clone_path: &Path, branch: &str, base: &str) -> Result<bool> {
+        let repo = Repository::open(clone_path)?;
+        let head = match repo.find_branch(branch, BranchType::Local) {
+            Ok(branch) => branch.into_reference().peel_to_commit()?.id(),
+            // The one error worth its own answer: Claude never made the
+            // branch. Anything else is a broken clone and says so.
+            Err(err) if err.code() == ErrorCode::NotFound => return Ok(false),
+            Err(err) => return Err(err).with_context(|| format!("looking up branch {branch}")),
+        };
+        let base = repo
+            .find_branch(base, BranchType::Local)
+            .with_context(|| format!("looking up base branch {base}"))?
+            .into_reference()
+            .peel_to_commit()?
+            .id();
+        let (ahead, _behind) = repo.graph_ahead_behind(head, base)?;
+        Ok(ahead > 0)
     }
 
     fn push(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
@@ -98,6 +135,28 @@ impl GitOps for Git2Ops {
         )?;
         Ok(())
     }
+}
+
+/// The clone at `clone_path`, cloned from `remote_url` if it isn't there yet.
+///
+/// Only a missing directory is cloned into: a path that exists but holds no
+/// repository is a provisioning mistake — most likely two instances pointed at
+/// one tree — and cloning over it would bury the evidence.
+fn open_or_clone(clone_path: &Path, remote_url: &str, token: &str) -> Result<Repository> {
+    if clone_path.exists() {
+        return Repository::open(clone_path)
+            .with_context(|| format!("opening the clone at {}", clone_path.display()));
+    }
+    if let Some(parent) = clone_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut fetch_options = FetchOptions::new();
+    fetch_options.remote_callbacks(credentials(token));
+    RepoBuilder::new()
+        .fetch_options(fetch_options)
+        .clone(remote_url, clone_path)
+        .with_context(|| format!("cloning {remote_url} into {}", clone_path.display()))
 }
 
 /// Callbacks that answer GitHub's HTTPS auth with the instance's OAuth token,
@@ -120,6 +179,9 @@ mod tests {
 
     /// The fixture remote is a local path, which never asks for credentials.
     const TOKEN: &str = "unused-by-a-local-remote";
+    /// For the fixtures that hand `sync_default` a clone that already exists,
+    /// so it never reaches the clone step.
+    const NO_REMOTE: &str = "never-cloned-from";
 
     fn commit_all(repo: &Repository, message: &str) {
         let mut index = repo.index().unwrap();
@@ -165,13 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn sync_branch_creates_branch_off_the_detected_default() {
-        // Deliberately not `main`: the default branch has to be detected.
+    fn sync_default_checks_out_the_detected_default_branch() {
+        // Deliberately not `main`: the default branch has to be detected, and
+        // its name is what every PR is opened against.
         let (_tmp, clone) = fixture("trunk");
-        Git2Ops.sync_branch(&clone, "cm/issue-1", TOKEN).unwrap();
+        assert_eq!(
+            Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap(),
+            "trunk"
+        );
 
         let repo = Repository::open(&clone).unwrap();
-        assert_eq!(repo.head().unwrap().shorthand(), Some("cm/issue-1"));
+        assert_eq!(repo.head().unwrap().shorthand(), Some("trunk"));
         assert_eq!(
             repo.head().unwrap().peel_to_commit().unwrap().id(),
             repo.find_branch("origin/trunk", BranchType::Remote)
@@ -184,9 +250,40 @@ mod tests {
     }
 
     #[test]
-    fn sync_branch_reuses_the_branch_and_throws_away_local_work() {
+    fn sync_default_clones_a_repo_that_is_not_on_the_box_yet() {
+        let (tmp, clone) = fixture("main");
+        let bare = tmp.path().join("remote.git");
+        let fresh = tmp.path().join("nested/not/cloned/yet");
+        drop(clone);
+
+        assert_eq!(
+            Git2Ops
+                .sync_default(&fresh, bare.to_str().unwrap(), TOKEN)
+                .unwrap(),
+            "main"
+        );
+        assert!(fresh.join("README.md").exists());
+    }
+
+    #[test]
+    fn sync_default_refuses_a_path_that_is_not_a_clone() {
+        // Two instances pointed at one tree is the way this happens, and
+        // cloning over it would bury the evidence.
+        let tmp = TempDir::new().unwrap();
+        let occupied = tmp.path().join("someone-elses-tree");
+        fs::create_dir_all(&occupied).unwrap();
+
+        assert!(
+            Git2Ops
+                .sync_default(&occupied, "unreachable", TOKEN)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sync_default_throws_away_local_work() {
         let (_tmp, clone) = fixture("main");
-        Git2Ops.sync_branch(&clone, "cm/issue-2", TOKEN).unwrap();
+        Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap();
 
         fs::write(clone.join("README.md"), "scribbled over\n").unwrap();
         fs::write(clone.join("junk.txt"), "tracked junk\n").unwrap();
@@ -194,16 +291,68 @@ mod tests {
         fs::create_dir_all(clone.join("leftovers")).unwrap();
         fs::write(clone.join("leftovers/scratch.txt"), "never staged\n").unwrap();
 
-        Git2Ops.sync_branch(&clone, "cm/issue-2", TOKEN).unwrap();
+        assert_eq!(
+            Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap(),
+            "main"
+        );
 
         let repo = Repository::open(&clone).unwrap();
-        assert_eq!(repo.head().unwrap().shorthand(), Some("cm/issue-2"));
+        assert_eq!(repo.head().unwrap().shorthand(), Some("main"));
         assert_eq!(
             fs::read_to_string(clone.join("README.md")).unwrap(),
             "seed\n"
         );
         assert!(!clone.join("junk.txt").exists());
         assert!(!clone.join("leftovers/scratch.txt").exists());
+    }
+
+    /// Checks out `branch` off HEAD in `clone`, so the fixture can hand
+    /// `has_new_commits` the two shapes a Claude run leaves behind.
+    fn branch_off_head(clone: &Path, branch: &str) {
+        let repo = Repository::open(clone).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch(branch, &head, true).unwrap();
+        repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+    }
+
+    #[test]
+    fn has_new_commits_is_false_for_a_branch_claude_never_made() {
+        let (_tmp, clone) = fixture("main");
+        let base = Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap();
+
+        assert!(
+            !Git2Ops
+                .has_new_commits(&clone, "claude/issue-1", &base)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn has_new_commits_is_false_for_a_branch_with_nothing_on_it() {
+        let (_tmp, clone) = fixture("main");
+        let base = Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap();
+        branch_off_head(&clone, "claude/issue-1");
+
+        assert!(
+            !Git2Ops
+                .has_new_commits(&clone, "claude/issue-1", &base)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn has_new_commits_is_true_once_something_is_committed() {
+        let (_tmp, clone) = fixture("main");
+        let base = Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap();
+        branch_off_head(&clone, "claude/issue-1");
+        fs::write(clone.join("fix.txt"), "the change\n").unwrap();
+        commit_all(&Repository::open(&clone).unwrap(), "fix: the thing");
+
+        assert!(
+            Git2Ops
+                .has_new_commits(&clone, "claude/issue-1", &base)
+                .unwrap()
+        );
     }
 
     /// Needs a real remote and a real token; run with
@@ -221,7 +370,8 @@ mod tests {
         drop(repo);
 
         let branch = format!("cm/push-test-{}", std::process::id());
-        Git2Ops.sync_branch(&clone, &branch, &token).unwrap();
+        Git2Ops.sync_default(&clone, &url, &token).unwrap();
+        branch_off_head(&clone, &branch);
         fs::write(clone.join("push-test.txt"), "hello\n").unwrap();
         commit_all(&Repository::open(&clone).unwrap(), "test: push smoke test");
         Git2Ops.push(&clone, &branch, &token).unwrap();
