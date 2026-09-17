@@ -70,6 +70,7 @@ ports=$(
         sed -n '/^INSTANCE_ORDINALS=(/,/^)/p' add-instance.sh
         sed -n '/^STATUS_PORT_BASE=/p' add-instance.sh
         sed -n '/^instance_name_from_ordinal()/,/^}/p' add-instance.sh
+        sed -n '/^status_port_of()/,/^}/p' add-instance.sh
         sed -n '/^status_port_for_name()/,/^}/p' add-instance.sh
         echo 'status_port_for_name claudius-maximus'
         echo 'status_port_for_name claudius-tertius'
@@ -79,6 +80,22 @@ ports=$(
 )
 [[ $ports == $'9781\n9783\n9880\nunknown' ]] || {
     echo "FAIL: status ports got ${ports@Q}"
+    fail=1
+}
+
+# Two instances collide on the port, however each of them spells its address,
+# and two that serve no page at all never collide.
+claims=$(
+    {
+        sed -n '/^status_port_of()/,/^}/p' add-instance.sh
+        echo 'echo "bare=$(status_port_of 9781)"'
+        echo 'echo "full=$(status_port_of 127.0.0.1:9781)"'
+        echo 'echo "v6=$(status_port_of [::1]:9781)"'
+        echo 'echo "off=$(status_port_of off)/$(status_port_of OFF)/$(status_port_of "")"'
+    } | bash
+)
+[[ $claims == $'bare=9781\nfull=9781\nv6=9781\noff=//' ]] || {
+    echo "FAIL: status address normalisation got ${claims@Q}"
     fail=1
 }
 

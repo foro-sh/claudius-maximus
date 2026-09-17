@@ -86,6 +86,15 @@ display_name_from_instance() {
 # use, which would otherwise be how you found out).
 STATUS_PORT_BASE=9780
 
+# The port half of a STATUS_ADDR, so that '9781', '127.0.0.1:9781' and
+# '[::1]:9781' all compare as the same claim on the same port, and 'off' as no
+# claim at all.
+status_port_of() {
+    local addr=${1,,}
+    [[ -z $addr || $addr == off || $addr == 0 ]] && return 0
+    echo "${addr##*:}"
+}
+
 status_port_for_name() {
     local want=$1 ordinal index=1
     for ordinal in "${INSTANCE_ORDINALS[@]}"; do
@@ -223,8 +232,10 @@ for env_file in /etc/claudius-*.env; do
     if grep -qxF "LABEL=$label" "$env_file"; then
         die "label '$label' is already owned by $env_file, every instance needs its own queue"
     fi
-    if grep -qxF "STATUS_ADDR=$status_addr" "$env_file"; then
-        die "status address '$status_addr' is already taken by $env_file, every instance needs its own port"
+    our_port=$(status_port_of "$status_addr")
+    their_port=$(status_port_of "$(sed -n 's/^STATUS_ADDR=//p' "$env_file" | head -1)")
+    if [[ -n $our_port && $our_port == "$their_port" ]]; then
+        die "status port $our_port is already taken by $env_file, every instance needs its own port"
     fi
 done
 
