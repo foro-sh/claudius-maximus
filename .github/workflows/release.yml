@@ -24,11 +24,6 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     steps:
-      # main is rule-protected ("PR required"), so the default GITHUB_TOKEN
-      # can't push semantic-release's changelog commit or tag. Mint a token
-      # from the foro-release App instead, which the ruleset lists as an
-      # always-bypass actor (see foro-sh/foro's release workflow for the
-      # same pattern).
       - name: Mint a release token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
