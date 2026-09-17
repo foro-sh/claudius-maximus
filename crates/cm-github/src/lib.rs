@@ -10,7 +10,7 @@ pub use client::OctocrabGithubClient;
 
 /// One issue as the worker's state machine needs to see it. The title and
 /// body ride along with the list: the title names the PR, and the body is the
-/// work order Claude is handed — the box it runs on has no GitHub credentials
+/// work order Claude is handed, since the box it runs on has no GitHub credentials
 /// of its own to read the issue with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
@@ -21,7 +21,7 @@ pub struct Issue {
 }
 
 /// One comment on an issue. The author is what tells the worker's own plan
-/// comment apart from anything else posted on the issue — the marker that
+/// comment apart from anything else posted on the issue: the marker that
 /// identifies a plan is public, so anyone able to comment could otherwise
 /// write one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub struct IssueComment {
 /// list issues carrying a label, read/add/remove labels, comment, and check
 /// the `blocked_by` dependency relationship. A real implementation
 /// authenticates via GitHub's OAuth device flow and stores the token in the
-/// instance's home — see #1, and [`OctocrabGithubClient`].
+/// instance's home (see #1, and [`OctocrabGithubClient`]).
 #[async_trait]
 pub trait GithubClient: Send + Sync {
     /// The login this client acts as, so the worker can recognise its own
@@ -51,12 +51,12 @@ pub trait GithubClient: Send + Sync {
     async fn remove_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn comment(&self, repo: &str, number: u64, body: &str) -> anyhow::Result<()>;
     /// Every comment on the issue, oldest first. The worker reads its own plan
-    /// comment back out of this on the implementing sweep — the plan is
+    /// comment back out of this on the implementing sweep: the plan is
     /// written one sweep and used the next, and GitHub is the only state the
     /// worker keeps.
     async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<IssueComment>>;
     /// Open a pull request from `head` onto `base`, returning its URL. If one
-    /// is already open for `head` — the branch is reused across retries — its
+    /// is already open for `head` (the branch is reused across retries), its
     /// URL comes back instead: a second PR for one issue is the thing to
     /// avoid, not an error to report.
     async fn create_pull_request(

@@ -1,5 +1,5 @@
 //! `$REPOS` and the rest of the worker's env-var config. Rust port of the
-//! bash worker's `repos.sh` + config block — same format, same defaults, so
+//! bash worker's `repos.sh` + config block, same format, same defaults, so
 //! migrating an instance's `/etc/<user>.env` needs no edits.
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,8 +19,8 @@ pub struct Config {
     pub repos: Vec<RepoEntry>,
     pub label: String,
     pub instance: String,
-    /// The GitHub OAuth App the device flow authorizes against — a deployment
-    /// detail, so it comes from the env like everything else.
+    /// The GitHub OAuth App the device flow authorizes against (a deployment
+    /// detail, so it comes from the env like everything else).
     pub github_client_id: String,
     pub plan_model: String,
     pub plan_effort: String,
@@ -39,7 +39,7 @@ impl Config {
         let repos = parse_repos(&repos_raw)?;
         let github_client_id = std::env::var("GITHUB_CLIENT_ID").map_err(|_| {
             anyhow::anyhow!(
-                "set GITHUB_CLIENT_ID to the client id of a GitHub OAuth App with device flow                  enabled — the worker authorizes against it"
+                "set GITHUB_CLIENT_ID to the client id of a GitHub OAuth App with device flow enabled; the worker authorizes against it"
             )
         })?;
 

@@ -1,5 +1,5 @@
 //! In-crate fakes for the worker's three boundaries: GitHub, git, and the
-//! `claude` CLI. Same spirit as `worker.sh`'s `tests/stubs/` — fake the
+//! `claude` CLI. Same spirit as `worker.sh`'s `tests/stubs/`: fake the
 //! boundary, run the real state machine against it.
 
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ impl FakeIssue {
 #[derive(Default)]
 struct GithubState {
     issues: Vec<FakeIssue>,
-    /// Every mutating/reading call, in order — the equivalent of the bash
+    /// Every mutating/reading call, in order: the equivalent of the bash
     /// suite's `$CALLS` file.
     calls: Vec<String>,
     comments: Vec<(String, u64, String)>,
@@ -306,7 +306,7 @@ impl GitOps for FakeGit {
 }
 
 /// Records what the worker would have asked Claude to do, and answers with
-/// canned output — `plan_text` for the plan step, failure for clones whose
+/// canned output: `plan_text` for the plan step, failure for clones whose
 /// directory name is in `fail_for` (the bash stub's `$FAIL_CLAUDE_FOR`).
 pub struct FakeClaude {
     plan_text: String,

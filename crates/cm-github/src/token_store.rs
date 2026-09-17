@@ -2,7 +2,7 @@
 //!
 //! A file in the instance's own home, not an OS keychain: the worker runs as a
 //! `nologin` unix user under systemd, with no login session, no D-Bus and no
-//! Secret Service for a keychain to live in — `keyring` would have nothing to
+//! Secret Service for a keychain to live in, so `keyring` would have nothing to
 //! talk to on the box this ships to. `$HOME` is already the trust boundary
 //! that holds the instance's Claude subscription credentials, so the GitHub
 //! token sits beside them, readable only by that user.
@@ -30,7 +30,7 @@ pub(crate) struct FileStore {
 
 impl FileStore {
     /// `$HOME/.claudius-maximus/github-token`. One instance per unix user, so
-    /// the home directory is what keeps two instances' tokens apart — and
+    /// the home directory is what keeps two instances' tokens apart, and
     /// nothing in the name depends on `$INSTANCE`, which is a display name an
     /// operator may reasonably reword. Keying the file on it would turn that
     /// edit into a token the worker cannot find, and an unattended worker that
@@ -71,7 +71,7 @@ impl TokenStore for FileStore {
             .context("the token path has no parent directory")?;
 
         // A symlink at either end aims our write at something someone else
-        // chose — refuse rather than follow it, the same way the label claim
+        // chose. Refuse rather than follow it, the same way the label claim
         // does. `create_dir_all` and `set_permissions` both follow links, so
         // the directory needs the check as much as the file does.
         refuse_symlink(dir)?;
@@ -87,8 +87,8 @@ impl TokenStore for FileStore {
         // there to answer.
         let temporary = self.path.with_extension("tmp");
         // The temporary file is the one actually opened and written through,
-        // so it is the one that must not be a symlink — a leftover from an
-        // earlier crash is reused as-is.
+        // so it is the one that must not be a symlink (a leftover from an
+        // earlier crash is reused as-is).
         refuse_symlink(&temporary)?;
         let mut file = OpenOptions::new()
             .write(true)
@@ -97,8 +97,8 @@ impl TokenStore for FileStore {
             .mode(0o600)
             .open(&temporary)
             .with_context(|| format!("opening {}", temporary.display()))?;
-        // `mode` above is ignored when the file already exists — a leftover
-        // from an earlier crash — so tighten before the token goes in rather
+        // `mode` above is ignored when the file already exists (a leftover
+        // from an earlier crash), so tighten before the token goes in rather
         // than after.
         file.set_permissions(fs::Permissions::from_mode(0o600))
             .with_context(|| format!("tightening {}", temporary.display()))?;
@@ -116,14 +116,14 @@ impl TokenStore for FileStore {
     }
 }
 
-/// Refuses a path that is a symlink. A path that does not exist yet is fine —
+/// Refuses a path that is a symlink. A path that does not exist yet is fine,
 /// it is the redirect we are looking for, not the absence. Any other stat
 /// error is propagated rather than read as "not a symlink": a path we cannot
 /// look at is not a path we should write through.
 fn refuse_symlink(path: &Path) -> anyhow::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_symlink() => anyhow::bail!(
-            "{} is a symlink — refusing to write through it",
+            "{} is a symlink, refusing to write through it",
             path.display()
         ),
         Ok(_) => Ok(()),

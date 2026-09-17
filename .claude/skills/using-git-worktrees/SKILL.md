@@ -26,7 +26,7 @@ BRANCH=$(git branch --show-current)
 **Submodule guard:** `GIT_DIR != GIT_COMMON` is also true inside git submodules. Before concluding "already in a worktree," verify you are not in a submodule:
 
 ```bash
-# If this returns a path, you're in a submodule, not a worktree — treat as normal repo
+# If this returns a path, you're in a submodule, not a worktree: treat as normal repo
 git rev-parse --show-superproject-working-tree 2>/dev/null
 ```
 
@@ -58,7 +58,7 @@ Only proceed to Step 1b if you have no native worktree tool available.
 
 ### 1b. Git Worktree Fallback
 
-**Only use this if Step 1a does not apply** — you have no native worktree tool available. Create a worktree manually using git.
+**Only use this if Step 1a does not apply**: you have no native worktree tool available. Create a worktree manually using git.
 
 #### Directory Selection
 
@@ -187,7 +187,7 @@ Ready to implement <feature-name>
 
 **Never:**
 - Create a worktree when Step 0 detects existing isolation
-- Use `git worktree add` when you have a native worktree tool (e.g., `EnterWorktree`). This is the #1 mistake — if you have it, use it.
+- Use `git worktree add` when you have a native worktree tool (e.g., `EnterWorktree`). This is the #1 mistake: if you have it, use it.
 - Skip Step 1a by jumping straight to Step 1b's git commands
 - Create worktree without verifying it's ignored (project-local)
 - Skip baseline test verification

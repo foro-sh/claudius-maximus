@@ -9,7 +9,7 @@
 //!   `<label>:done`                     -> ignored
 //!
 //! No approval step: applying the label is the only human action required. The
-//! plan comment is not a gate — nobody has to approve it — but it is not
+//! plan comment is not a gate (nobody has to approve it), but it is not
 //! decoration either: the next sweep reads it back out of the issue and hands
 //! it to the implementing run, which is the only place it is kept.
 //!
@@ -58,7 +58,7 @@ impl Worker<'_> {
             self.config.poll_interval.as_secs(),
         ));
         self.notifier.post(&format!(
-            ":crown: {} is awake — draining the `{}` backlog in {}.",
+            ":crown: {} is awake, draining the `{}` backlog in {}.",
             self.config.instance,
             self.config.label,
             self.repo_names().join(" ")
@@ -77,12 +77,12 @@ impl Worker<'_> {
                 self.log(&format!("{}: sweep error (continuing): {err:#}", repo.repo));
                 self.notifier.post_once(
                     // A repo whose issues cannot be listed, or whose clone
-                    // cannot be synced, fails for every issue in it at once —
+                    // cannot be synced, fails for every issue in it at once:
                     // one piece of news, and one a success in that repo
                     // genuinely clears.
                     &repo_failure_key(&repo.repo),
                     &format!(
-                        ":warning: {} could not be swept — will retry — https://github.com/{}",
+                        ":warning: {} could not be swept, will retry: https://github.com/{}",
                         repo.repo, repo.repo
                     ),
                 );
@@ -115,8 +115,8 @@ impl Worker<'_> {
             {
                 continue;
             }
-            // What to do with it — and whether there is anything to do at all
-            // — is decided before the clone is touched: most of a backlog is
+            // What to do with it, and whether there is anything to do at all,
+            // is decided before the clone is touched: most of a backlog is
             // usually blocked or done, and syncing for those costs two TLS
             // handshakes and a full checkout to accomplish nothing.
             let action = match self.action_for(repo, &issue).await {
@@ -128,8 +128,8 @@ impl Worker<'_> {
                 }
             };
 
-            // A clone that cannot be synced is a tree of unknown shape — it
-            // may still be sitting on the last issue's branch — and every
+            // A clone that cannot be synced is a tree of unknown shape: it
+            // may still be sitting on the last issue's branch, and every
             // other issue in this repo would fail the same way. Abandon the
             // repo for this sweep rather than spending a connect timeout per
             // issue in it. A repo that isn't on the box at all is cloned here,
@@ -152,7 +152,7 @@ impl Worker<'_> {
             }
         }
         // The repo evidently answers and its clone syncs, so an earlier
-        // repo-wide warning is no longer the current state — said again next
+        // repo-wide warning is no longer the current state, said again next
         // time it happens, which a drained or wholly-blocked backlog would
         // otherwise never allow.
         self.notifier.forget(&repo_failure_key(&repo.repo));
@@ -174,7 +174,7 @@ impl Worker<'_> {
         self.notifier.post_once(
             &issue_failure_key(&repo.repo, number),
             &format!(
-                ":warning: {}#{number} could not be processed — will retry — {}",
+                ":warning: {}#{number} could not be processed, will retry: {}",
                 repo.repo,
                 issue_url(&repo.repo, number)
             ),
@@ -189,7 +189,7 @@ impl Worker<'_> {
         if labels.iter().any(|l| *l == self.done_label()) {
             return Ok(None);
         }
-        // ponytail: no DAG/topo sort — the serial sweep re-checks every issue,
+        // ponytail: no DAG/topo sort. The serial sweep re-checks every issue,
         // so skipping blocked ones until their blockers close IS the dependency
         // order. A blocker's issue closes when its PR merges (Closes #N).
         if self
@@ -235,11 +235,11 @@ impl Worker<'_> {
             &self.config.plan_model,
             &self.config.plan_effort,
             &format!(
-                "You are triaging GitHub issue #{number} in {}. The issue is quoted below — it is
+                "You are triaging GitHub issue #{number} in {}. The issue is quoted below, and it is
 all you get, since this box has no GitHub access of its own. Read it and the
 relevant code in this repo. Produce a concise implementation plan in markdown:
 the approach, the files you'd touch, tests, and risks. Do NOT modify any files
-or run git — output the plan text only.
+or run git. Output the plan text only.
 
 {}",
                 repo.repo,
@@ -270,7 +270,7 @@ or run git — output the plan text only.
         self.notifier.forget(&repo_failure_key(&repo.repo));
         self.backoff.forget(&issue_failure_key(&repo.repo, number));
         self.notifier.post(&format!(
-            ":scroll: planned {}#{number} — implementing next sweep — {}",
+            ":scroll: planned {}#{number}, implementing next sweep: {}",
             repo.repo,
             issue_url(&repo.repo, number)
         ));
@@ -284,8 +284,8 @@ or run git — output the plan text only.
         base: &str,
     ) -> anyhow::Result<()> {
         let number = issue.number;
-        // A plan comment that is gone — deleted, or never posted because the
-        // label was applied by hand — cannot come back on its own, so failing
+        // A plan comment that is gone (deleted, or never posted because the
+        // label was applied by hand) cannot come back on its own, so failing
         // it every sweep would notify forever about a state nothing changes.
         // Dropping `:planned` puts the issue back in front of the planning
         // step, which is the one thing that does fix it.
@@ -298,7 +298,7 @@ or run git — output the plan text only.
                 repo.repo, number
             ));
             self.notifier.post(&format!(
-                ":scroll: {}#{number} lost its plan — re-planning next sweep — {}",
+                ":scroll: {}#{number} lost its plan, re-planning next sweep: {}",
                 repo.repo,
                 issue_url(&repo.repo, number)
             ));
@@ -308,7 +308,7 @@ or run git — output the plan text only.
 
         // A failed implementation is not a sweep error: the issue keeps the
         // trigger label and the next sweep retries it, exactly as the quota
-        // design intends. The same goes for a failed push or PR — the commits
+        // design intends. The same goes for a failed push or PR: the commits
         // are on the branch, so the retry picks up where this left off. Every
         // one of those failures goes through here, so none of them is visible
         // only in the journal.
@@ -320,15 +320,15 @@ or run git — output the plan text only.
                 self.github
                     .remove_label(&repo.repo, number, &self.config.label)
                     .await?;
-                self.log(&format!("{}#{}: done — {url}", repo.repo, number));
+                self.log(&format!("{}#{}: done: {url}", repo.repo, number));
                 // Whatever went wrong here before is history now, so the next
-                // failure is news again rather than old news — for this issue,
+                // failure is news again rather than old news, for this issue,
                 // and for the repo, which is evidently reachable.
                 self.notifier.forget(&issue_failure_key(&repo.repo, number));
                 self.notifier.forget(&repo_failure_key(&repo.repo));
                 self.backoff.forget(&issue_failure_key(&repo.repo, number));
                 self.notifier.post(&format!(
-                    ":white_check_mark: shipped {}#{number} — {url}",
+                    ":white_check_mark: shipped {}#{number}: {url}",
                     repo.repo
                 ));
             }
@@ -350,7 +350,7 @@ or run git — output the plan text only.
                     // again.
                     &issue_failure_key(&repo.repo, number),
                     &format!(
-                        ":warning: {}#{number} implement failed — will retry — {}",
+                        ":warning: {}#{number} implement failed, will retry: {}",
                         repo.repo,
                         issue_url(&repo.repo, number)
                     ),
@@ -380,13 +380,13 @@ or run git — output the plan text only.
             &self.config.implement_effort,
             &format!(
                 "Implement GitHub issue #{number} in {}, following this repo's CLAUDE.md.
-The issue and the plan already agreed for it are quoted below — they are all
+The issue and the plan already agreed for it are quoted below, and they are all
 you get, since this box has no GitHub access of its own. Follow the plan;
 where it turns out to be wrong, say so in the commit messages.
 The clone was just synced with {base} and you have no credentials to fetch with,
 so work from it as it stands: check out branch {branch} (reuse it if it already
 exists), implement the change, run the test/lint commands from CLAUDE.md. Commit in many small,
-logically-scoped commits as you go — one per coherent step — rather than a
+logically-scoped commits as you go (one per coherent step) rather than a
 single large commit. Each commit must still pass commitlint (Conventional
 Commits). Leave the commits on {branch} and stop there: do NOT push, do NOT
 open a pull request, do NOT merge anything. Pushing and opening the PR is the
@@ -407,7 +407,7 @@ worker's job, and the box has no credentials for you to do it with.
         // broken worker rather than like the one thing that actually happened.
         if !self.git.has_new_commits(&repo.clone_path, &branch, base)? {
             anyhow::bail!(
-                "claude committed nothing to {branch} — nothing to open a pull request with, \
+                "claude committed nothing to {branch}: nothing to open a pull request with, \
                  retrying next sweep"
             );
         }
@@ -443,7 +443,7 @@ worker's job, and the box has no credentials for you to do it with.
     ///
     /// Only comments the worker itself wrote count. The marker is posted in
     /// public on every planned issue, so anyone who can comment could write
-    /// one — and whatever a plan comment says goes straight into a
+    /// one, and whatever a plan comment says goes straight into a
     /// `--dangerously-skip-permissions` run that commits and opens a PR.
     ///
     /// Either bookkeeping line identifies it. An operator rewriting the plan
@@ -452,7 +452,7 @@ worker's job, and the box has no credentials for you to do it with.
     /// than recognising the line beside it.
     ///
     /// Everything else in the comment survives, so steering the next sweep by
-    /// editing the plan — the documented way to correct one — works wherever
+    /// editing the plan (the documented way to correct one) works wherever
     /// the edit is made.
     async fn plan_comment(&self, repo: &RepoEntry, number: u64) -> anyhow::Result<Option<String>> {
         let mine = self.github.login();
@@ -472,7 +472,7 @@ worker's job, and the box has no credentials for you to do it with.
     ///
     /// The marker names the label, so two instances sharing one GitHub account
     /// never pick up each other's plans. A comment carrying no marker at all is
-    /// ours by its footer — that is a plan an operator rewrote in GitHub's
+    /// ours by its footer: that is a plan an operator rewrote in GitHub's
     /// editor, where the marker is visible and easy to drop.
     fn is_our_plan(&self, comment: &str) -> bool {
         let marker = self.plan_marker();
@@ -517,7 +517,7 @@ worker's job, and the box has no credentials for you to do it with.
     }
 
     /// With two instances on one box streaming into the same journal, an
-    /// unattributed line is unattributable — every line names its instance.
+    /// unattributed line is unattributable, so every line names its instance.
     /// journald stamps the time, so the line doesn't.
     fn log(&self, message: &str) {
         println!("{}: {message}", self.config.instance);
@@ -617,7 +617,7 @@ fn issue_url(repo: &str, number: u64) -> String {
 
 /// An empty allowlist trusts every issue author (only safe where filing an
 /// issue already requires access). Where it's set, a stranger labelling their
-/// own issue — or a public repo's drive-by issue — must not hand Claude a
+/// own issue, or a public repo's drive-by issue, must not hand Claude a
 /// prompt to implement.
 fn author_allowed(author: &str, allowlist: &[String]) -> bool {
     // GitHub logins are case-insensitive; compare on a common casing so a
@@ -1476,7 +1476,7 @@ mod tests {
     #[tokio::test]
     async fn an_outsider_cannot_get_their_own_issue_implemented() {
         // Worst case: a drive-by issue on a public repo that is already labeled
-        // and already planned — implementation must still never trigger.
+        // and already planned: implementation must still never trigger.
         let harness = Harness::new(
             config(
                 vec![repo("foro-sh/foro", "foro", &["danielsteman"])],

@@ -10,16 +10,16 @@
 #
 # The script picks the next free Latin-ordinal name (claudius-maximus,
 # claudius-secundus, … claudius-centesimus; cap 100) and uses it as the unix
-# user, the LABEL, and — title-cased — the INSTANCE display name. Pass a name
+# user, the LABEL, and, title-cased, the INSTANCE display name. Pass a name
 # from that list explicitly to re-run / repair that slot.
 #
 # Clone paths default to /home/<name>/repos/<owner>/<repo> when REPOS entries
 # omit a path. Absolute paths are still accepted and must stay under that home.
-# The clones are not made here — the worker clones what is missing on its first
+# The clones are not made here: the worker clones what is missing on its first
 # sweep, with its own token, which is what makes a private repo work.
 #
-# The two steps that need a human — `claude login` for that person's
-# subscription, and the worker's own GitHub device flow — are printed at the
+# The two steps that need a human (`claude login` for that person's
+# subscription, and the worker's own GitHub device flow) are printed at the
 # end rather than automated: both are interactive, and both must run as the
 # person who actually holds the subscription.
 #
@@ -87,7 +87,7 @@ name_is_known() {
 }
 
 # Taken if the unix user exists, its env file exists, or any env file already
-# claims this LABEL — any one of those means the slot is occupied.
+# claims this LABEL: any one of those means the slot is occupied.
 name_is_taken() {
     local name=$1 env_file
     id -u "$name" >/dev/null 2>&1 && return 0
@@ -108,7 +108,7 @@ pick_next_name() {
             return 0
         fi
     done
-    die "all ${#INSTANCE_ORDINALS[@]} instance names are taken — cap is 100"
+    die "all ${#INSTANCE_ORDINALS[@]} instance names are taken, cap is 100"
 }
 
 [[ $# -le 1 ]] || die "usage: REPOS=... GITHUB_CLIENT_ID=... GIT_AUTHOR_NAME=... GIT_AUTHOR_EMAIL=... $0 [claudius-<ordinal>]"
@@ -122,20 +122,20 @@ fi
 label=$user
 instance=$(display_name_from_instance "$user")
 
-[[ -n ${REPOS:-} ]] || die "set REPOS=owner/name[,owner/name2[=author|author]|…] — see README"
-# One OAuth App is shared by every instance — the device flow is what makes
+[[ -n ${REPOS:-} ]] || die "set REPOS=owner/name[,owner/name2[=author|author]|…], see README"
+# One OAuth App is shared by every instance: the device flow is what makes
 # each one a different GitHub account, not a different app.
-[[ -n ${GITHUB_CLIENT_ID:-} ]] || die "set GITHUB_CLIENT_ID — the GitHub OAuth App the device flow authorizes against"
-[[ -n ${GIT_AUTHOR_NAME:-} ]] || die "set GIT_AUTHOR_NAME — commits are attributed to it"
-[[ -n ${GIT_AUTHOR_EMAIL:-} ]] || die "set GIT_AUTHOR_EMAIL — must be verified on this instance's GitHub account"
+[[ -n ${GITHUB_CLIENT_ID:-} ]] || die "set GITHUB_CLIENT_ID, the GitHub OAuth App the device flow authorizes against"
+[[ -n ${GIT_AUTHOR_NAME:-} ]] || die "set GIT_AUTHOR_NAME, commits are attributed to it"
+[[ -n ${GIT_AUTHOR_EMAIL:-} ]] || die "set GIT_AUTHOR_EMAIL, must be verified on this instance's GitHub account"
 
 binary=${CLAUDIUS_BINARY:-target/release/claudius-maximus}
-[[ -x $binary ]] || die "no binary at $binary — 'cargo build --release' first, or point CLAUDIUS_BINARY at one (every release carries claudius-maximus-linux-x86_64)"
+[[ -x $binary ]] || die "no binary at $binary, 'cargo build --release' first, or point CLAUDIUS_BINARY at one (every release carries claudius-maximus-linux-x86_64)"
 [[ -f claudius@.service ]] || die "run me from the repo checkout (claudius@.service not found here)"
 
 home=/home/$user
 
-# Parsed up front so a typo in REPOS fails before anything is created — and
+# Parsed up front so a typo in REPOS fails before anything is created, and
 # before the script needs root at all. Two instances sharing a working tree
 # corrupt each other (both check out branches and hard-reset onto origin's
 # default), so a clone outside this instance's own home is refused, not warned
@@ -161,15 +161,15 @@ for entry in "${entries[@]}"; do
             [[ -n $authors ]] || die "invalid REPOS entry '$entry' (trailing '=' with no author allowlist)"
         fi
     elif [[ $rest == */* ]]; then
-        # A relative path (has a slash but no leading one) — refuse rather than
+        # A relative path (has a slash but no leading one): refuse rather than
         # treat it as an author allowlist.
         die "invalid REPOS entry '$entry' (clone path must be absolute)"
     else
-        # authors only — no path
+        # authors only, no path
         path=$home/repos/$repo
         authors=$rest
     fi
-    [[ $path == "$home"/* ]] || die "clone path $path is outside $home — instances must never share a working tree"
+    [[ $path == "$home"/* ]] || die "clone path $path is outside $home, instances must never share a working tree"
     if [[ -n ${clones[$path]+x} && ${clones[$path]} != "$repo" ]]; then
         die "clone path $path is claimed by both ${clones[$path]} and $repo"
     fi
@@ -197,7 +197,7 @@ for env_file in /etc/claudius-*.env; do
     [[ -e $env_file ]] || continue
     [[ $env_file == "/etc/$user.env" ]] && continue
     if grep -qxF "LABEL=$label" "$env_file"; then
-        die "label '$label' is already owned by $env_file — every instance needs its own queue"
+        die "label '$label' is already owned by $env_file, every instance needs its own queue"
     fi
 done
 
@@ -246,7 +246,7 @@ fi
 
 unit=/etc/systemd/system/claudius@.service
 if [[ -e $unit ]] && ! cmp -s claudius@.service "$unit"; then
-    die "$unit differs from this checkout's — reconcile them, then re-run (the template is shared by every instance)"
+    die "$unit differs from this checkout's, reconcile them, then re-run (the template is shared by every instance)"
 fi
 install -m 644 claudius@.service "$unit"
 systemctl daemon-reload
@@ -267,7 +267,7 @@ Three things left, none of them automatable:
          claude login && claude doctor
          unset ANTHROPIC_API_KEY
 
-  3. Its GitHub device-flow login — run the worker once in the foreground as
+  3. Its GitHub device-flow login. Run the worker once in the foreground as
      that same user, open the code + URL it prints as this instance's GitHub
      account, then Ctrl-C:
        sudo -u $user -H bash -lc 'set -a; . $env_file; set +a; $home/claudius-maximus/claudius-maximus'

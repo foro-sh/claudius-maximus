@@ -28,11 +28,11 @@ async fn main() -> anyhow::Result<()> {
         Ok(claim) => claim,
         Err(ClaimError::Held { holder }) => {
             notifier.post(&format!(
-                ":no_entry: {} refused to start — `{}` is already claimed by {holder}.",
+                ":no_entry: {} refused to start: `{}` is already claimed by {holder}.",
                 config.instance, config.label
             ));
             anyhow::bail!(
-                "label {} is already being drained by {holder} — two workers on one label open \
+                "label {} is already being drained by {holder}. Two workers on one label open \
                  competing PRs. Give this instance its own LABEL.",
                 config.label
             );
