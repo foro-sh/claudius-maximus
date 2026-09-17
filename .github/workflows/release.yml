@@ -54,6 +54,26 @@ jobs:
             pnpm exec commitlint --from "$BEFORE" --to "$AFTER" --verbose
           fi
 
+      # The binary the release carries. musl rather than glibc: the box this
+      # ships to is somebody's VPS, and a glibc build refuses to start on any
+      # distro older than the runner's. libgit2 and OpenSSL are already
+      # vendored, so the result needs nothing on the box but a kernel.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Built before semantic-release, which attaches it: the asset has to
+      # exist by the time the GitHub release is published.
+      - name: Build the worker
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
+
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

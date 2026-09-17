@@ -130,7 +130,7 @@ instance=$(display_name_from_instance "$user")
 [[ -n ${GIT_AUTHOR_EMAIL:-} ]] || die "set GIT_AUTHOR_EMAIL — must be verified on this instance's GitHub account"
 
 binary=${CLAUDIUS_BINARY:-target/release/claudius-maximus}
-[[ -x $binary ]] || die "no binary at $binary — 'cargo build --release' first, or set CLAUDIUS_BINARY"
+[[ -x $binary ]] || die "no binary at $binary — 'cargo build --release' first, or point CLAUDIUS_BINARY at one (every release carries claudius-maximus-linux-x86_64)"
 [[ -f claudius@.service ]] || die "run me from the repo checkout (claudius@.service not found here)"
 
 home=/home/$user

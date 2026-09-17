@@ -101,8 +101,10 @@ unset ANTHROPIC_API_KEY            # and remove it from any profile/env
 # 2. Drop the binary in place. (The clones are the worker's own job — it
 #    makes them on its first sweep, with its own token.)
 mkdir -p /home/claudius-maximus/claudius-maximus
-# ...scp target/release/claudius-maximus here, then:
-chmod +x /home/claudius-maximus/claudius-maximus/claudius-maximus
+cd /home/claudius-maximus/claudius-maximus
+curl -fsSLo claudius-maximus \
+  https://github.com/foro-sh/claudius-maximus/releases/latest/download/claudius-maximus-linux-x86_64
+chmod +x claudius-maximus     # or scp your own target/release/claudius-maximus here
 ```
 
 **GitHub login is the binary's own job.** On first run it starts GitHub's OAuth
@@ -258,6 +260,10 @@ subscription. With no name argument it takes the next free slot from the ordinal
 list; pass a known name explicitly only to re-run / repair that slot.
 
 ```bash
+# Every release carries a static linux/x86_64 binary; grab that instead of
+# building if the box has no Rust toolchain:
+#   curl -fsSLo claudius-maximus https://github.com/foro-sh/claudius-maximus/releases/latest/download/claudius-maximus-linux-x86_64
+#   chmod +x claudius-maximus && export CLAUDIUS_BINARY=$PWD/claudius-maximus
 cargo build --release
 sudo env REPOS=foro-sh/claudius-maximus \
          GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx \
