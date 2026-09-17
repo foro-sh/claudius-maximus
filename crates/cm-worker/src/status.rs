@@ -70,6 +70,18 @@ impl Stage {
     }
 }
 
+/// Every stage there is, for the renderers that want one series per stage
+/// rather than one value naming the current one.
+pub const STAGES: [Stage; 7] = [
+    Stage::Rising,
+    Stage::Authorizing,
+    Stage::Sweeping,
+    Stage::Planning,
+    Stage::Implementing,
+    Stage::Shipping,
+    Stage::Resting,
+];
+
 /// A stage, and what it is being done to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {

@@ -5,6 +5,7 @@ mod config;
 #[cfg(test)]
 mod fakes;
 mod heartbeat;
+mod httpd;
 mod limits;
 mod notify;
 mod status;
@@ -79,6 +80,15 @@ async fn main() -> anyhow::Result<()> {
         (_, Some(watchdog)) => Some(watchdog / 2),
         _ => None,
     };
+    // Up before the device flow rather than after it, so that the page can
+    // answer "what is it waiting for" during the one stage that waits on a
+    // human. A port already in use is fatal here: an instance nobody can watch
+    // is exactly the thing this is for.
+    if let Some(addr) = config.status_addr {
+        httpd::serve(addr, status.clone())?;
+        println!("{}: status page on http://{addr}/", config.instance);
+    }
+
     if let Some(every) = beat_every {
         Heartbeat {
             status: status.clone(),
