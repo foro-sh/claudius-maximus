@@ -31,6 +31,11 @@ pub struct Heartbeat {
     /// How long a `claude` run may say nothing before that is worth a message.
     /// Zero turns that off.
     pub stall_after: Duration,
+    /// No journal lines, only systemd. What `HEARTBEAT_INTERVAL=0` means under
+    /// a unit with a watchdog: somebody asked for the old silence, and the
+    /// watchdog still has to be answered or systemd kills a healthy worker
+    /// every few minutes.
+    pub quiet: bool,
 }
 
 /// What the thread carries between ticks, so that a beat that says the same
@@ -80,7 +85,7 @@ impl Heartbeat {
         // Silence is the point. A resting worker between sweeps is not news
         // once a minute; a run in flight, or a window being waited out, is
         // exactly what nobody could see before.
-        if snapshot.activity.stage.runs_claude() || snapshot.window.is_shut() {
+        if !self.quiet && (snapshot.activity.stage.runs_claude() || snapshot.window.is_shut()) {
             self.log_if_due(snapshot, beat);
         } else {
             beat.last_logged = None;
@@ -160,6 +165,7 @@ mod tests {
             instance: "Claudius Maximus".to_string(),
             every: Duration::from_secs(60),
             stall_after: Duration::from_secs(1800),
+            quiet: false,
         }
     }
 
@@ -240,6 +246,25 @@ mod tests {
         heartbeat.stall_after = Duration::from_secs(1800);
         heartbeat.tick(&status.snapshot(), &mut beat);
         assert_eq!(beat.stalled, None, "a line ends the silence");
+    }
+
+    #[test]
+    fn a_quiet_heartbeat_still_beats_but_writes_nothing() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        status.doing(Activity::run(
+            Stage::Implementing,
+            "foro-sh/foro#7",
+            "sonnet",
+        ));
+        let mut heartbeat = heartbeat(status.clone());
+        heartbeat.quiet = true;
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&status.snapshot(), &mut beat);
+        assert_eq!(
+            beat.last_logged, None,
+            "the journal stays quiet, systemd and the watchdog do not"
+        );
     }
 
     #[test]

@@ -16,7 +16,14 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# notify, not simple: the worker sends READY=1 itself and then keeps a
+# STATUS= line up to date, so `systemctl status claudius@<user>` says what it
+# is doing ("implementing foro-sh/foro#7 for 12m", "waiting out a spent usage
+# window for 1h20m") instead of only "active (running)". READY=1 is sent
+# before the GitHub device flow, which waits on a human opening a URL and
+# would otherwise be counted against TimeoutStartSec.
+Type=notify
+NotifyAccess=main
 User=%i
 Group=%i
 WorkingDirectory=/home/%i
@@ -31,6 +38,14 @@ Environment=CLAUDE_CODE_RETRY_WATCHDOG=1
 # "Daniel Steman" loses its second word.
 EnvironmentFile=/etc/%i.env
 ExecStart=/home/%i/claudius-maximus/claudius-maximus
+# The heartbeat thread pings this at half the interval below. It proves the
+# process is alive and its threads are still scheduled, which is all a watchdog
+# can prove: a claude run legitimately blocks for hours, and a spent usage
+# window legitimately blocks for five, so neither of those may be a restart.
+# What it catches is the worker that is still there with nobody home. Set
+# HEARTBEAT_INTERVAL=0 in the env file to silence the journal lines; the pings
+# carry on regardless.
+WatchdogSec=180
 Restart=always
 RestartSec=30
 StandardOutput=journal

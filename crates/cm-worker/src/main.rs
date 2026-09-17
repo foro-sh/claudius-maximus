@@ -70,14 +70,24 @@ async fn main() -> anyhow::Result<()> {
             }
         );
     }
-    if !config.heartbeat_interval.is_zero() {
+    // `HEARTBEAT_INTERVAL=0` asks for no journal lines, which is not the same
+    // as asking for no thread: under a unit with a watchdog, something has to
+    // answer it or systemd restarts a perfectly healthy worker every few
+    // minutes.
+    let beat_every = match (config.heartbeat_interval, systemd.watchdog_interval()) {
+        (interval, _) if !interval.is_zero() => Some(interval),
+        (_, Some(watchdog)) => Some(watchdog / 2),
+        _ => None,
+    };
+    if let Some(every) = beat_every {
         Heartbeat {
             status: status.clone(),
             notifier: notifier.clone(),
             systemd: systemd.clone(),
             instance: config.instance.clone(),
-            every: config.heartbeat_interval,
+            every,
             stall_after: config.stall_after,
+            quiet: config.heartbeat_interval.is_zero(),
         }
         .start();
     }
