@@ -78,6 +78,26 @@ display_name_from_instance() {
     echo "$out"
 }
 
+# Each instance serves its status page on its own port, derived from its
+# ordinal: claudius-maximus on 9781, claudius-secundus on 9782, and so on to
+# claudius-centesimus on 9880. Derived rather than allocated so that re-running
+# the script for a slot always produces the same port, and so that two
+# instances can never be handed one (the worker refuses to start on a port in
+# use, which would otherwise be how you found out).
+STATUS_PORT_BASE=9780
+
+status_port_for_name() {
+    local want=$1 ordinal index=1
+    for ordinal in "${INSTANCE_ORDINALS[@]}"; do
+        if [[ $(instance_name_from_ordinal "$ordinal") == "$want" ]]; then
+            echo $((STATUS_PORT_BASE + index))
+            return 0
+        fi
+        index=$((index + 1))
+    done
+    return 1
+}
+
 name_is_known() {
     local want=$1 ordinal
     for ordinal in "${INSTANCE_ORDINALS[@]}"; do
@@ -121,6 +141,7 @@ else
 fi
 label=$user
 instance=$(display_name_from_instance "$user")
+status_addr=${STATUS_ADDR:-127.0.0.1:$(status_port_for_name "$user")}
 
 [[ -n ${REPOS:-} ]] || die "set REPOS=owner/name[,owner/name2[=author|author]|…], see README"
 # One OAuth App is shared by every instance: the device flow is what makes
@@ -193,11 +214,17 @@ unset IFS
 # opening competing PRs. The worker catches that at startup with its own lock,
 # but catching it here means never starting the second unit at all. Skip our
 # own env file so re-runs stay idempotent.
+# Same for the status port: two workers on one port means the second refuses
+# to start, and finding that out from a failed unit is worse than finding it
+# out here.
 for env_file in /etc/claudius-*.env; do
     [[ -e $env_file ]] || continue
     [[ $env_file == "/etc/$user.env" ]] && continue
     if grep -qxF "LABEL=$label" "$env_file"; then
         die "label '$label' is already owned by $env_file, every instance needs its own queue"
+    fi
+    if grep -qxF "STATUS_ADDR=$status_addr" "$env_file"; then
+        die "status address '$status_addr' is already taken by $env_file, every instance needs its own port"
     fi
 done
 
@@ -233,6 +260,15 @@ PLAN_EFFORT=${PLAN_EFFORT:-high}
 IMPLEMENT_MODEL=${IMPLEMENT_MODEL:-claude-sonnet-5}
 IMPLEMENT_EFFORT=${IMPLEMENT_EFFORT:-high}
 POLL_INTERVAL=${POLL_INTERVAL:-60}
+# Where this instance's status page, /metrics and /healthz live. 'off' turns
+# them off; a bare port means loopback. Nothing here belongs on a public
+# interface without something in front of it.
+STATUS_ADDR=$status_addr
+# Seconds between heartbeat lines while a run is in flight (0 = none, systemd
+# still gets its status line and its watchdog ping), and how long a run may
+# write nothing before that is said out loud (0 = never say it).
+HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-60}
+STALL_AFTER=${STALL_AFTER:-1800}
 ${CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL:+CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=$CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL}
 GIT_AUTHOR_NAME="$GIT_AUTHOR_NAME"
 GIT_AUTHOR_EMAIL=$GIT_AUTHOR_EMAIL
@@ -275,4 +311,10 @@ Three things left, none of them automatable:
 Then:
     systemctl enable --now claudius@$user
     journalctl -u claudius@$user -f
+
+Once it is up, $instance says what it is doing in three places:
+
+    systemctl status claudius@$user     # one line: the current stage
+    curl http://$status_addr/           # the page, with the chronicle
+    curl http://$status_addr/healthz    # 503 only if the sweep loop stopped
 EOF

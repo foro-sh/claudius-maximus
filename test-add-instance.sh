@@ -62,6 +62,26 @@ ordinals_count=$(sed -n '/^INSTANCE_ORDINALS=(/,/^)/p' add-instance.sh \
     fail=1
 }
 
+# Status ports are derived from the ordinal, so the same slot always gets the
+# same port and two instances can never be handed one. Pulled out of the script
+# itself rather than copied, so a change to the table is caught here.
+ports=$(
+    {
+        sed -n '/^INSTANCE_ORDINALS=(/,/^)/p' add-instance.sh
+        sed -n '/^STATUS_PORT_BASE=/p' add-instance.sh
+        sed -n '/^instance_name_from_ordinal()/,/^}/p' add-instance.sh
+        sed -n '/^status_port_for_name()/,/^}/p' add-instance.sh
+        echo 'status_port_for_name claudius-maximus'
+        echo 'status_port_for_name claudius-tertius'
+        echo 'status_port_for_name claudius-centesimus'
+        echo 'status_port_for_name claudius-nobody || echo unknown'
+    } | bash
+)
+[[ $ports == $'9781\n9783\n9880\nunknown' ]] || {
+    echo "FAIL: status ports got ${ports@Q}"
+    fail=1
+}
+
 display=$(bash -c '
 display_name_from_instance() {
     local out= part
