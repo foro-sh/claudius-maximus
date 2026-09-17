@@ -27,6 +27,13 @@ pub struct Config {
     pub implement_model: String,
     pub implement_effort: String,
     pub poll_interval: Duration,
+    /// How often the heartbeat looks at what the worker is doing. Zero turns
+    /// the thread off entirely, for anyone who wants the old silence back.
+    pub heartbeat_interval: Duration,
+    /// How long a `claude` run may write nothing before the worker says so.
+    /// Zero turns that off. It is only ever said, never acted on: a run that
+    /// has been thinking for an hour is still an hour of work worth having.
+    pub stall_after: Duration,
     pub claim_dir: PathBuf,
     pub mattermost_webhook_url: Option<String>,
 }
@@ -52,11 +59,9 @@ impl Config {
             plan_effort: env_or("PLAN_EFFORT", "high"),
             implement_model: env_or("IMPLEMENT_MODEL", "claude-sonnet-5"),
             implement_effort: env_or("IMPLEMENT_EFFORT", "high"),
-            poll_interval: Duration::from_secs(
-                env_or("POLL_INTERVAL", "60").parse().map_err(|_| {
-                    anyhow::anyhow!("POLL_INTERVAL must be a whole number of seconds")
-                })?,
-            ),
+            poll_interval: env_secs("POLL_INTERVAL", 60)?,
+            heartbeat_interval: env_secs("HEARTBEAT_INTERVAL", 60)?,
+            stall_after: env_secs("STALL_AFTER", 1800)?,
             claim_dir: PathBuf::from(env_or("CLAUDIUS_CLAIM_DIR", "/tmp")),
             mattermost_webhook_url: std::env::var("CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL").ok(),
         })
@@ -65,6 +70,21 @@ impl Config {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// A whole number of seconds out of the environment. A typo here is fatal
+/// rather than defaulted: `HEARTBEAT_INTERVAL=1m` silently meaning 60 seconds
+/// on one box and 0 on another is exactly the kind of thing nobody notices
+/// until they are reading a journal that has been quiet for a week.
+fn env_secs(key: &str, default: u64) -> anyhow::Result<Duration> {
+    let Ok(raw) = std::env::var(key) else {
+        return Ok(Duration::from_secs(default));
+    };
+    let secs: u64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{key} must be a whole number of seconds, got '{raw}'"))?;
+    Ok(Duration::from_secs(secs))
 }
 
 /// Parses the same format as `repos.sh`'s `parse_repos`: comma-separated
@@ -108,6 +128,33 @@ fn parse_repos(raw: &str) -> anyhow::Result<Vec<RepoEntry>> {
         anyhow::bail!("REPOS is empty (want owner/name=/abs/path/to/clone[,...])");
     }
     Ok(repos)
+}
+
+#[cfg(test)]
+impl Config {
+    /// A config to build test cases on, so that a new knob is one edit here
+    /// rather than one in every module that needs a `Config` to test with.
+    pub fn sample() -> Config {
+        Config {
+            repos: vec![RepoEntry {
+                repo: "foro-sh/foro".to_string(),
+                clone_path: PathBuf::from("/clones/foro"),
+                authors: vec![],
+            }],
+            github_client_id: "Iv1.testclientid".to_string(),
+            label: "claudius-maximus".to_string(),
+            instance: "Claudius Maximus".to_string(),
+            plan_model: "claude-opus-5".to_string(),
+            plan_effort: "high".to_string(),
+            implement_model: "claude-sonnet-5".to_string(),
+            implement_effort: "high".to_string(),
+            poll_interval: Duration::from_secs(60),
+            heartbeat_interval: Duration::from_secs(60),
+            stall_after: Duration::from_secs(1800),
+            claim_dir: PathBuf::from("/tmp"),
+            mattermost_webhook_url: None,
+        }
+    }
 }
 
 #[cfg(test)]

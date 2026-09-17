@@ -16,14 +16,19 @@
 //! Durable state lives in GitHub labels (no DB), so the worker is stateless
 //! and a reboot loses nothing.
 
+use std::path::Path;
+use std::time::{Duration, Instant};
+
 use anyhow::Context;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue};
 
 use crate::backoff::Backoff;
-use crate::claude_cli::Claude;
+use crate::claude_cli::{Claude, ClaudeRun, RunObserver, Stream};
 use crate::config::{Config, RepoEntry};
+use crate::limits::{self, Signal};
 use crate::notify::Notifier;
+use crate::status::{Activity, Level, Stage, Status, Tally, human};
 
 /// What a sweep decided one issue needs, before any clone is touched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +36,27 @@ enum Action {
     Plan,
     Implement,
 }
+
+/// What came of acting on one issue, for the sweep's tally. A failure that
+/// reported itself on the way out (`implement_issue` does) comes back as
+/// `Failed` rather than as an `Err`, so it is counted once and reported once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Planned,
+    Shipped,
+    /// Acted on, nothing to show for it: a plan comment that has gone missing,
+    /// so the issue is back in front of the planning step.
+    Nothing,
+    Failed,
+}
+
+/// Names the usage window for [`Notifier::post_once`]. One key for the whole
+/// instance, because one subscription is one window: every issue in the
+/// backlog is waiting on the same reset, and hearing that once is the point.
+const WINDOW_KEY: &str = "usage window";
+
+/// Names the warning that the window is nearly spent.
+const WINDOW_NEARLY_KEY: &str = "usage window nearly spent";
 
 pub struct Worker<'a> {
     pub config: &'a Config,
@@ -42,6 +68,9 @@ pub struct Worker<'a> {
     pub backoff: &'a Backoff,
     /// The instance's OAuth token, for pushing `claude/issue-N` over HTTPS.
     pub token: &'a str,
+    /// Told what the worker is doing, for everything that watches from
+    /// outside: the heartbeat, systemd, the status page.
+    pub status: &'a Status,
 }
 
 impl Worker<'_> {
@@ -63,8 +92,16 @@ impl Worker<'_> {
             self.config.label,
             self.repo_names().join(" ")
         ));
+        self.status.note(
+            Level::Note,
+            format!(
+                "{} rose, draining {}",
+                self.config.instance, self.config.label
+            ),
+        );
         loop {
             self.sweep().await;
+            self.status.doing(Activity::bare(Stage::Resting));
             tokio::time::sleep(self.config.poll_interval).await;
         }
     }
@@ -72,8 +109,16 @@ impl Worker<'_> {
     /// One pass over every configured repo, draining each one's backlog before
     /// moving on.
     pub async fn sweep(&self) {
+        let started = Instant::now();
+        let mut tally = Tally::default();
         for repo in &self.config.repos {
-            if let Err(err) = self.sweep_repo(repo).await {
+            self.status
+                .doing(Activity::on(Stage::Sweeping, repo.repo.clone()));
+            if let Err(err) = self.sweep_repo(repo, &mut tally).await {
+                tally.failed += 1;
+                self.status.repo_failed();
+                self.status
+                    .note(Level::Bad, format!("{} could not be swept", repo.repo));
                 self.log(&format!("{}: sweep error (continuing): {err:#}", repo.repo));
                 self.notifier.post_once(
                     // A repo whose issues cannot be listed, or whose clone
@@ -88,17 +133,25 @@ impl Worker<'_> {
                 );
             }
         }
+        // The one line that says what a quiet sweep did. Without it the
+        // journal's only entries are failures, so an instance drained of work
+        // and an instance that stopped looking read exactly alike.
+        let took = started.elapsed();
+        self.log(&tally.line(took));
+        self.status.swept(tally, took);
     }
 
-    async fn sweep_repo(&self, repo: &RepoEntry) -> anyhow::Result<()> {
+    async fn sweep_repo(&self, repo: &RepoEntry, tally: &mut Tally) -> anyhow::Result<()> {
         let issues = self
             .github
             .list_labeled_issues(&repo.repo, &self.config.label)
             .await?;
+        tally.seen += issues.len() as u64;
         for issue in issues {
             // The author rides along with the list, so gating costs no extra
             // API call.
             if !author_allowed(&issue.author, &repo.authors) {
+                tally.skipped += 1;
                 self.log(&format!(
                     "{}#{}: author @{} not allowlisted for this repo, skipping",
                     repo.repo, issue.number, issue.author
@@ -113,6 +166,7 @@ impl Worker<'_> {
                 .backoff
                 .resting(&issue_failure_key(&repo.repo, issue.number))
             {
+                tally.resting += 1;
                 continue;
             }
             // What to do with it, and whether there is anything to do at all,
@@ -121,8 +175,12 @@ impl Worker<'_> {
             // handshakes and a full checkout to accomplish nothing.
             let action = match self.action_for(repo, &issue).await {
                 Ok(Some(action)) => action,
-                Ok(None) => continue,
+                Ok(None) => {
+                    tally.skipped += 1;
+                    continue;
+                }
                 Err(err) => {
+                    tally.failed += 1;
                     self.report_issue_failure(repo, issue.number, &err);
                     continue;
                 }
@@ -143,12 +201,20 @@ impl Worker<'_> {
                 .sync_default(&repo.clone_path, &clone_url(&repo.repo), self.token)
                 .with_context(|| format!("syncing {}", repo.repo))?;
 
-            if let Err(err) = self.act(repo, &issue, action, &base).await {
-                // Everything that fails inside `implement_issue` is reported
-                // there; what reaches here is a failure to plan, or to read
-                // the issue's own state. Both re-run every sweep, so neither
-                // should be visible only to whoever tails the journal.
-                self.report_issue_failure(repo, issue.number, &err);
+            match self.act(repo, &issue, action, &base).await {
+                Ok(Outcome::Planned) => tally.planned += 1,
+                Ok(Outcome::Shipped) => tally.shipped += 1,
+                Ok(Outcome::Nothing) => tally.skipped += 1,
+                Ok(Outcome::Failed) => tally.failed += 1,
+                Err(err) => {
+                    // Everything that fails inside `implement_issue` is
+                    // reported there; what reaches here is a failure to plan,
+                    // or to read the issue's own state. Both re-run every
+                    // sweep, so neither should be visible only to whoever
+                    // tails the journal.
+                    tally.failed += 1;
+                    self.report_issue_failure(repo, issue.number, &err);
+                }
             }
         }
         // The repo evidently answers and its clone syncs, so an earlier
@@ -162,6 +228,11 @@ impl Worker<'_> {
     /// Everything that fails around one issue is said once per issue, and said
     /// again after the next success there.
     fn report_issue_failure(&self, repo: &RepoEntry, number: u64, err: &anyhow::Error) {
+        self.status.issue_failed();
+        self.status.note(
+            Level::Bad,
+            format!("{}#{number} could not be processed", repo.repo),
+        );
         let resting_for = self.backoff.record_failure(
             &issue_failure_key(&repo.repo, number),
             self.config.poll_interval,
@@ -216,7 +287,7 @@ impl Worker<'_> {
         issue: &Issue,
         action: Action,
         base: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Outcome> {
         match action {
             Action::Plan => self.plan_issue(repo, issue).await,
             Action::Implement => self.implement_issue(repo, issue, base).await,
@@ -224,27 +295,31 @@ impl Worker<'_> {
     }
 
     /// Posts an implementation plan, then marks the issue planned.
-    async fn plan_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<()> {
+    async fn plan_issue(&self, repo: &RepoEntry, issue: &Issue) -> anyhow::Result<Outcome> {
         let number = issue.number;
         self.log(&format!("{}#{}: planning", repo.repo, number));
         // The planning run is told to touch nothing, so the permissive mode is
         // only about not being stuck on an interactive approval prompt on a box
         // with nobody at the keyboard.
-        let plan = self.claude.run(
-            &repo.clone_path,
-            &self.config.plan_model,
-            &self.config.plan_effort,
-            &format!(
-                "You are triaging GitHub issue #{number} in {}. The issue is quoted below, and it is
+        let prompt = format!(
+            "You are triaging GitHub issue #{number} in {}. The issue is quoted below, and it is
 all you get, since this box has no GitHub access of its own. Read it and the
 relevant code in this repo. Produce a concise implementation plan in markdown:
 the approach, the files you'd touch, tests, and risks. Do NOT modify any files
 or run git. Output the plan text only.
 
 {}",
-                repo.repo,
-                quote_issue(issue)
-            ),
+            repo.repo,
+            quote_issue(issue)
+        );
+        let plan = self.run_claude(
+            Stage::Planning,
+            &repo.repo,
+            number,
+            &repo.clone_path,
+            &self.config.plan_model,
+            &self.config.plan_effort,
+            &prompt,
         )?;
         if plan.trim().is_empty() {
             anyhow::bail!("empty plan, will retry next sweep");
@@ -269,12 +344,15 @@ or run git. Output the plan text only.
         self.notifier.forget(&issue_failure_key(&repo.repo, number));
         self.notifier.forget(&repo_failure_key(&repo.repo));
         self.backoff.forget(&issue_failure_key(&repo.repo, number));
+        self.status.planned();
+        self.status
+            .note(Level::Good, format!("planned {}#{number}", repo.repo));
         self.notifier.post(&format!(
             ":scroll: planned {}#{number}, implementing next sweep: {}",
             repo.repo,
             issue_url(&repo.repo, number)
         ));
-        Ok(())
+        Ok(Outcome::Planned)
     }
 
     async fn implement_issue(
@@ -282,7 +360,7 @@ or run git. Output the plan text only.
         repo: &RepoEntry,
         issue: &Issue,
         base: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Outcome> {
         let number = issue.number;
         // A plan comment that is gone (deleted, or never posted because the
         // label was applied by hand) cannot come back on its own, so failing
@@ -297,12 +375,19 @@ or run git. Output the plan text only.
                 "{}#{}: no plan comment of ours, re-planning next sweep",
                 repo.repo, number
             ));
+            self.status.note(
+                Level::Bad,
+                format!(
+                    "{}#{number} lost its plan, re-planning next sweep",
+                    repo.repo
+                ),
+            );
             self.notifier.post(&format!(
                 ":scroll: {}#{number} lost its plan, re-planning next sweep: {}",
                 repo.repo,
                 issue_url(&repo.repo, number)
             ));
-            return Ok(());
+            return Ok(Outcome::Nothing);
         };
         self.log(&format!("{}#{}: implementing", repo.repo, number));
 
@@ -312,7 +397,7 @@ or run git. Output the plan text only.
         // are on the branch, so the retry picks up where this left off. Every
         // one of those failures goes through here, so none of them is visible
         // only in the journal.
-        match self.implement_and_ship(repo, issue, &plan, base).await {
+        let outcome = match self.implement_and_ship(repo, issue, &plan, base).await {
             Ok(url) => {
                 self.github
                     .add_label(&repo.repo, number, &self.done_label())
@@ -327,12 +412,23 @@ or run git. Output the plan text only.
                 self.notifier.forget(&issue_failure_key(&repo.repo, number));
                 self.notifier.forget(&repo_failure_key(&repo.repo));
                 self.backoff.forget(&issue_failure_key(&repo.repo, number));
+                self.status.shipped();
+                self.status.note(
+                    Level::Good,
+                    format!("shipped {}#{number}: {url}", repo.repo),
+                );
                 self.notifier.post(&format!(
                     ":white_check_mark: shipped {}#{number}: {url}",
                     repo.repo
                 ));
+                Outcome::Shipped
             }
             Err(err) => {
+                self.status.issue_failed();
+                self.status.note(
+                    Level::Bad,
+                    format!("{}#{number} failed to implement", repo.repo),
+                );
                 let resting_for = self.backoff.record_failure(
                     &issue_failure_key(&repo.repo, number),
                     self.config.poll_interval,
@@ -355,9 +451,10 @@ or run git. Output the plan text only.
                         issue_url(&repo.repo, number)
                     ),
                 );
+                Outcome::Failed
             }
-        }
-        Ok(())
+        };
+        Ok(outcome)
     }
 
     /// Run the implementation and open its PR, returning the PR's URL.
@@ -374,12 +471,8 @@ or run git. Output the plan text only.
         // realistic headless mode for a bot on an isolated, unprivileged box.
         // Tighten with a settings.json allowlist if this ever runs somewhere
         // less contained.
-        self.claude.run(
-            &repo.clone_path,
-            &self.config.implement_model,
-            &self.config.implement_effort,
-            &format!(
-                "Implement GitHub issue #{number} in {}, following this repo's CLAUDE.md.
+        let prompt = format!(
+            "Implement GitHub issue #{number} in {}, following this repo's CLAUDE.md.
 The issue and the plan already agreed for it are quoted below, and they are all
 you get, since this box has no GitHub access of its own. Follow the plan;
 where it turns out to be wrong, say so in the commit messages.
@@ -397,10 +490,18 @@ worker's job, and the box has no credentials for you to do it with.
 ## The plan
 
 {}",
-                repo.repo,
-                quote_issue(issue),
-                fenced(plan)
-            ),
+            repo.repo,
+            quote_issue(issue),
+            fenced(plan)
+        );
+        self.run_claude(
+            Stage::Implementing,
+            &repo.repo,
+            number,
+            &repo.clone_path,
+            &self.config.implement_model,
+            &self.config.implement_effort,
+            &prompt,
         )?;
         // A run that committed nothing has no pull request in it. Pushing
         // anyway gets GitHub's "no commits between" 422, which reads like a
@@ -422,6 +523,10 @@ worker's job, and the box has no credentials for you to do it with.
         branch: &str,
         base: &str,
     ) -> anyhow::Result<String> {
+        self.status.doing(Activity::on(
+            Stage::Shipping,
+            format!("{}#{}", repo.repo, issue.number),
+        ));
         self.git.push(&repo.clone_path, branch, self.token)?;
         self.github
             .create_pull_request(
@@ -435,6 +540,64 @@ worker's job, and the box has no credentials for you to do it with.
                 ),
             )
             .await
+    }
+
+    /// One `claude` run, watched.
+    ///
+    /// Everything that made a run opaque is handled here rather than at the
+    /// two call sites: the register learns which stage is in flight and what
+    /// the run last said, the journal gets the run's stderr while it is still
+    /// running, and a spent usage window is recognised as it happens instead
+    /// of being inferred hours later from a gap in the log.
+    #[allow(clippy::too_many_arguments)]
+    fn run_claude(
+        &self,
+        stage: Stage,
+        repo: &str,
+        number: u64,
+        repo_dir: &Path,
+        model: &str,
+        effort: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let subject = format!("{repo}#{number}");
+        self.status
+            .doing(Activity::run(stage, subject.clone(), model));
+        let watch = RunWatch {
+            status: self.status,
+            notifier: self.notifier,
+            instance: &self.config.instance,
+            subject: subject.clone(),
+        };
+
+        let started = Instant::now();
+        let result = self.claude.run(ClaudeRun {
+            repo_dir,
+            model,
+            effort,
+            prompt,
+            observer: &watch,
+        });
+        let took = started.elapsed();
+
+        self.status.ran_claude(took, result.is_ok());
+        // An answer is proof the window is open, whatever was or was not
+        // recognised in the run's output while it waited. A *failed* run
+        // proves nothing: the likeliest way for one to fail on a spent window
+        // is for it to give up on it, and calling that a reopening would
+        // announce a recovery on every retry, all the way to the reset.
+        if result.is_ok() {
+            watch.reopened();
+        }
+        self.log(&format!(
+            "{subject}: {} run {} after {}",
+            stage.word(),
+            if result.is_ok() { "finished" } else { "failed" },
+            human(took)
+        ));
+        // Whatever this run was quiet about, it is not quiet about it now.
+        self.notifier.forget(&stall_key(&subject));
+        result
     }
 
     /// The plan this instance posted, read back out of the issue's comments
@@ -522,6 +685,131 @@ worker's job, and the box has no credentials for you to do it with.
     fn log(&self, message: &str) {
         println!("{}: {message}", self.config.instance);
     }
+}
+
+/// Watches one `claude` run from the threads draining its pipes.
+///
+/// Holds the two things that are safe to touch from there (the register and
+/// the notifier) and not the `Worker`, whose GitHub client belongs to the
+/// async side of the house. The Mattermost POST it can make is worth up to ten
+/// seconds of a held-up pipe, once per usage window: `claude` is waiting hours
+/// at that point, so the cost is nothing and the alternative is a channel to
+/// nowhere.
+struct RunWatch<'a> {
+    status: &'a Status,
+    notifier: &'a Notifier,
+    instance: &'a str,
+    /// `foro-sh/foro#7`: what this run is for.
+    subject: String,
+}
+
+impl RunObserver for RunWatch<'_> {
+    fn line(&self, stream: Stream, line: &str) {
+        self.status.heard(line);
+        // Stderr is where a run says it is in trouble, so it goes to the
+        // journal as it arrives. Stdout is the answer (a whole plan, an
+        // implement run's chatter): it feeds the register, which keeps the
+        // last line, and that is enough to tell a working run from a stuck
+        // one without copying a plan into the journal twice.
+        if stream == Stream::Stderr && !line.trim().is_empty() {
+            self.log(&format!("{} claude: {line}", self.subject));
+        }
+        match limits::classify(line) {
+            Some(Signal::Spent(spent)) => self.spent(&spent),
+            Some(Signal::Resumed) => self.reopened(),
+            Some(Signal::Approaching) => self.approaching(),
+            None => {}
+        }
+    }
+}
+
+impl RunWatch<'_> {
+    /// The window is spent and the run is waiting it out. Said once per
+    /// window: the CLI repeats itself while it waits.
+    fn spent(&self, spent: &limits::Spent) {
+        if !self.status.window_shut(spent) {
+            return;
+        }
+        let when = reset_phrase(spent);
+        self.log(&format!(
+            "{}: usage window spent{when}, the run waits for the reset rather than failing",
+            self.subject
+        ));
+        self.status.note(
+            Level::Bad,
+            format!("usage window spent on {}{when}", self.subject),
+        );
+        self.notifier.post_once(
+            WINDOW_KEY,
+            &format!(
+                ":hourglass_flowing_sand: {} has spent its usage window on {}{when}. The run is \
+                 waiting for the reset, nothing is lost.",
+                self.instance, self.subject
+            ),
+        );
+    }
+
+    /// The window is open again, if it was ever shut.
+    fn reopened(&self) {
+        let Some(shut_for) = self.status.window_open() else {
+            return;
+        };
+        let waited = human(shut_for);
+        self.log(&format!(
+            "{}: usage window reopened after {waited}, carrying on",
+            self.subject
+        ));
+        self.status
+            .note(Level::Good, format!("usage window reopened after {waited}"));
+        self.notifier.forget(WINDOW_KEY);
+        self.notifier.forget(WINDOW_NEARLY_KEY);
+        self.notifier.post(&format!(
+            ":crown: {} is back in the usage window after {waited}; {} carries on.",
+            self.instance, self.subject
+        ));
+    }
+
+    /// Nearly spent. Worth one line: it means the run in flight may be the
+    /// last one for a few hours.
+    fn approaching(&self) {
+        self.status.note(
+            Level::Bad,
+            format!("usage window nearly spent on {}", self.subject),
+        );
+        self.notifier.post_once(
+            WINDOW_NEARLY_KEY,
+            &format!(
+                ":warning: {} is close to spending its usage window on {}.",
+                self.instance, self.subject
+            ),
+        );
+    }
+
+    fn log(&self, message: &str) {
+        println!("{}: {message}", self.instance);
+    }
+}
+
+/// What a limit notice said about the reset, as a phrase to hang off the end
+/// of a sentence. Empty when it said nothing, which the CLI often does.
+fn reset_phrase(spent: &limits::Spent) -> String {
+    match (spent.resets_at, &spent.said) {
+        (Some(epoch), _) => format!(
+            " (reopens in {})",
+            human(Duration::from_secs(
+                epoch.saturating_sub(crate::status::now_epoch())
+            ))
+        ),
+        (None, Some(said)) => format!(" (claude said: {said})"),
+        (None, None) => String::new(),
+    }
+}
+
+/// Names one run for [`Notifier::post_once`], for the heartbeat's "this run
+/// has said nothing for half an hour" line. Keyed on the issue, so the next
+/// run on the same issue can be quiet all over again and be heard.
+pub fn stall_key(subject: &str) -> String {
+    format!("stalled {subject}")
 }
 
 /// Where a repo is cloned from. HTTPS, because the token is the only
@@ -646,16 +934,9 @@ mod tests {
     fn config(repos: Vec<RepoEntry>, label: &str, instance: &str) -> Config {
         Config {
             repos,
-            github_client_id: "Iv1.testclientid".to_string(),
             label: label.to_string(),
             instance: instance.to_string(),
-            plan_model: "claude-opus-5".to_string(),
-            plan_effort: "high".to_string(),
-            implement_model: "claude-sonnet-5".to_string(),
-            implement_effort: "high".to_string(),
-            poll_interval: Duration::from_secs(60),
-            claim_dir: PathBuf::from("/tmp"),
-            mattermost_webhook_url: None,
+            ..Config::sample()
         }
     }
 
@@ -674,6 +955,7 @@ mod tests {
         config: Config,
         notifier: Notifier,
         backoff: Backoff,
+        status: Status,
     }
 
     impl Harness {
@@ -684,8 +966,23 @@ mod tests {
                 claude,
                 notifier: Notifier::new(None, config.instance.clone()),
                 backoff: Backoff::default(),
+                status: Status::new(&config),
                 config,
             }
+        }
+
+        fn snapshot(&self) -> crate::status::Snapshot {
+            self.status.snapshot()
+        }
+
+        /// Everything the register was told, in order, which is what the
+        /// status page and `/status.json` show.
+        fn events(&self) -> Vec<String> {
+            self.snapshot()
+                .events
+                .into_iter()
+                .map(|event| event.text)
+                .collect()
         }
 
         async fn sweep(&self) {
@@ -697,10 +994,148 @@ mod tests {
                 notifier: &self.notifier,
                 backoff: &self.backoff,
                 token: "fake-token",
+                status: &self.status,
             }
             .sweep()
             .await;
         }
+    }
+
+    #[tokio::test]
+    async fn the_register_counts_what_a_sweep_did() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        let snapshot = harness.snapshot();
+        assert_eq!(snapshot.counters.sweeps, 1);
+        assert_eq!(snapshot.counters.issues_seen, 1);
+        assert_eq!(snapshot.counters.plans_posted, 1);
+        assert_eq!(snapshot.counters.claude_runs, 1);
+        assert_eq!(snapshot.counters.claude_failures, 0);
+        let last = snapshot.last_sweep.expect("a sweep finished");
+        assert_eq!(last.tally.planned, 1);
+        assert_eq!(last.tally.seen, 1);
+        assert!(
+            harness
+                .events()
+                .iter()
+                .any(|e| e == "planned foro-sh/foro#7"),
+            "{:?}",
+            harness.events()
+        );
+
+        harness.sweep().await;
+        let snapshot = harness.snapshot();
+        assert_eq!(snapshot.counters.pulls_opened, 1);
+        assert_eq!(snapshot.last_sweep.unwrap().tally.shipped, 1);
+    }
+
+    #[tokio::test]
+    async fn a_spent_usage_window_is_recognised_while_the_run_waits_it_out() {
+        let resets_at = crate::status::now_epoch() + 3600;
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            // Said twice, as the CLI does while it waits, and then the run
+            // answers: that is a whole window, lived through inside one run.
+            FakeClaude::default().saying(&[
+                &format!("Claude AI usage limit reached|{resets_at}"),
+                &format!("Claude AI usage limit reached|{resets_at}"),
+            ]),
+        );
+
+        harness.sweep().await;
+
+        let snapshot = harness.snapshot();
+        assert_eq!(
+            snapshot.counters.windows_shut, 1,
+            "one window, however many times the CLI said so"
+        );
+        assert!(
+            !snapshot.window.is_shut(),
+            "the run came back with an answer, so the window is open again"
+        );
+        assert!(snapshot.counters.window_time > Duration::ZERO);
+        let events = harness.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.starts_with("usage window spent on foro-sh/foro#7")),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.starts_with("usage window reopened after")),
+            "{events:?}"
+        );
+        assert_eq!(
+            harness.github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string(), format!("{LABEL}:planned")],
+            "waiting out a window is not failing: the issue was planned"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_dies_on_a_spent_window_leaves_the_window_shut() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::failing_for(&["foro"]).saying(&["Claude AI usage limit reached"]),
+        );
+
+        harness.sweep().await;
+
+        let snapshot = harness.snapshot();
+        assert!(
+            snapshot.window.is_shut(),
+            "a run that gave up proves nothing about the window; only an answer does"
+        );
+        assert_eq!(snapshot.counters.claude_failures, 1);
+        assert_eq!(snapshot.last_sweep.unwrap().tally.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn an_issue_resting_off_a_failure_is_counted_as_resting_not_as_work() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::failing_for(&["foro"]),
+        );
+
+        harness.sweep().await;
+        harness.sweep().await;
+
+        let snapshot = harness.snapshot();
+        assert_eq!(snapshot.counters.sweeps, 2);
+        assert_eq!(
+            snapshot.counters.claude_runs, 1,
+            "the second sweep is resting"
+        );
+        let last = snapshot.last_sweep.expect("two sweeps finished");
+        assert_eq!(last.tally.resting, 1);
+        assert_eq!(last.tally.failed, 0);
     }
 
     #[tokio::test]
@@ -1201,6 +1636,7 @@ mod tests {
             notifier: &notifier,
             backoff: &Backoff::default(),
             token: "fake-token",
+            status: &Status::new(&config),
         }
         .sweep()
         .await;
@@ -1271,6 +1707,7 @@ mod tests {
             notifier: &notifier,
             backoff: &Backoff::default(),
             token: "fake-token",
+            status: &Status::new(&config),
         }
         .sweep()
         .await;
@@ -1362,6 +1799,7 @@ mod tests {
             notifier: &notifier,
             backoff: &Backoff::default(),
             token: "fake-token",
+            status: &Status::new(&config),
         }
         .sweep()
         .await;
@@ -1656,6 +2094,7 @@ mod tests {
             notifier: &notifier,
             backoff: &Backoff::default(),
             token: "fake-token",
+            status: &Status::new(&config),
         }
         .sweep()
         .await;

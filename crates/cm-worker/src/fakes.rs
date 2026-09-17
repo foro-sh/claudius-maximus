@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue, IssueComment};
 
-use crate::claude_cli::Claude;
+use crate::claude_cli::{Claude, ClaudeRun, Stream};
 
 /// One issue as the fake serves it: the labels it carries and whether an open
 /// issue blocks it.
@@ -308,9 +308,11 @@ impl GitOps for FakeGit {
 /// Records what the worker would have asked Claude to do, and answers with
 /// canned output: `plan_text` for the plan step, failure for clones whose
 /// directory name is in `fail_for` (the bash stub's `$FAIL_CLAUDE_FOR`).
+///
 pub struct FakeClaude {
     plan_text: String,
     fail_for: Vec<String>,
+    says: Vec<String>,
     runs: Mutex<Vec<(PathBuf, String)>>,
 }
 
@@ -319,6 +321,7 @@ impl Default for FakeClaude {
         FakeClaude {
             plan_text: "## Plan\ndo the thing".to_string(),
             fail_for: Vec::new(),
+            says: Vec::new(),
             runs: Mutex::new(Vec::new()),
         }
     }
@@ -339,6 +342,14 @@ impl FakeClaude {
         }
     }
 
+    /// A run that writes these lines to stderr before it answers, which is
+    /// how a test drives the worker's reading of the usage window without
+    /// waiting five hours for a real one.
+    pub fn saying(mut self, lines: &[&str]) -> Self {
+        self.says = lines.iter().map(|l| l.to_string()).collect();
+        self
+    }
+
     /// Every `(clone path, prompt)` the worker ran, in order.
     pub fn runs(&self) -> Vec<(PathBuf, String)> {
         self.runs.lock().unwrap().clone()
@@ -350,24 +361,23 @@ impl FakeClaude {
 }
 
 impl Claude for FakeClaude {
-    fn run(
-        &self,
-        repo_dir: &Path,
-        _model: &str,
-        _effort: &str,
-        prompt: &str,
-    ) -> anyhow::Result<String> {
+    fn run(&self, run: ClaudeRun<'_>) -> anyhow::Result<String> {
         self.runs
             .lock()
             .unwrap()
-            .push((repo_dir.to_path_buf(), prompt.to_string()));
-        let dir_name = repo_dir
+            .push((run.repo_dir.to_path_buf(), run.prompt.to_string()));
+        for line in &self.says {
+            run.observer.line(Stream::Stderr, line);
+        }
+        let dir_name = run
+            .repo_dir
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         if self.fail_for.contains(&dir_name) {
             anyhow::bail!("claude failed for {dir_name}");
         }
+        run.observer.line(Stream::Stdout, &self.plan_text);
         Ok(self.plan_text.clone())
     }
 }
