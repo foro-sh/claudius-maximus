@@ -35,6 +35,9 @@ const REQUEST_MAX: usize = 8 * 1024;
 /// How often the page refreshes itself.
 const REFRESH_SECS: u32 = 5;
 
+/// How long the accept loop waits after an error it cannot do anything about.
+const ACCEPT_PAUSE: Duration = Duration::from_millis(200);
+
 pub struct Response {
     pub code: u16,
     pub reason: &'static str,
@@ -89,8 +92,15 @@ pub fn serve(addr: SocketAddr, status: Arc<Status>) -> anyhow::Result<()> {
                     Ok(stream) => serve_one(stream, &status),
                     // One refused connection is not worth a line per attempt,
                     // and is certainly not worth ending the only thread that
-                    // can answer the next one.
-                    Err(_) => continue,
+                    // can answer the next one. The pause is for the errors
+                    // that do not clear on their own (out of file
+                    // descriptors, most of them): accepting in a tight loop
+                    // against one of those would take a core away from the
+                    // worker, on a box that may only have the one.
+                    Err(_) => {
+                        std::thread::sleep(ACCEPT_PAUSE);
+                        continue;
+                    }
                 }
             }
         })?;
@@ -578,6 +588,15 @@ fn page(snapshot: &Snapshot) -> String {
         None => String::new(),
     };
 
+    // Escaped one at a time and then joined: escaping the joined string would
+    // turn the separator's own entity into text.
+    let repos = snapshot
+        .repos
+        .iter()
+        .map(|repo| escape(repo))
+        .collect::<Vec<_>>()
+        .join(" &middot; ");
+
     let events = if snapshot.events.is_empty() {
         "<li class=note>nothing has happened yet</li>".to_string()
     } else {
@@ -599,7 +618,7 @@ fn page(snapshot: &Snapshot) -> String {
 
     PAGE.replace("%%INSTANCE%%", &escape(&snapshot.instance))
         .replace("%%LABEL%%", &escape(&snapshot.label))
-        .replace("%%REPOS%%", &escape(&snapshot.repos.join(" &middot; ")))
+        .replace("%%REPOS%%", &repos)
         .replace("%%STATE%%", state)
         .replace("%%HEADLINE%%", &escape(&snapshot.doing()))
         .replace("%%SUBLINE%%", &escape(&snapshot.line()))
@@ -931,6 +950,19 @@ mod tests {
             grace_for(Duration::from_secs(300)),
             Duration::from_secs(3000)
         );
+    }
+
+    #[test]
+    fn several_repos_are_listed_without_the_separator_showing_through() {
+        let mut snapshot = snapshot();
+        snapshot.repos = vec!["foro-sh/foro".to_string(), "foro-sh/<i>".to_string()];
+        let page = body("/", &snapshot);
+
+        assert!(
+            page.contains("foro-sh/foro &middot; foro-sh/&lt;i&gt;"),
+            "{page}"
+        );
+        assert!(!page.contains("&amp;middot;"), "{page}");
     }
 
     #[test]
