@@ -31,32 +31,26 @@ pub struct Systemd {
 }
 
 impl Systemd {
-    /// Reads `NOTIFY_SOCKET` and `WATCHDOG_USEC`, and takes them out of the
-    /// environment on the way past: the `claude` child inherits this process's
-    /// environment, and a child that can reach the notify socket can answer
-    /// the watchdog on behalf of a parent that has stopped answering.
+    /// Reads `NOTIFY_SOCKET` and `WATCHDOG_USEC`.
     ///
-    /// Must be called before any thread is spawned, which is why it is called
-    /// from the top of `main`: removing an environment variable is unsound
-    /// while another thread may be reading one.
+    /// The variables are left in the environment rather than removed: under
+    /// `#[tokio::main]` the runtime's threads already exist by the time any of
+    /// this runs, and removing an environment variable with other threads
+    /// alive is unsound. The `claude` child is kept away from the notify
+    /// socket where the child is spawned instead (see `claude_cli`), which is
+    /// the only place that inherits it.
     pub fn from_env() -> Self {
         let socket = std::env::var("NOTIFY_SOCKET")
             .ok()
             .filter(|s| !s.is_empty());
-        let usec = std::env::var("WATCHDOG_USEC").ok();
-        let pid = std::env::var("WATCHDOG_PID").ok();
-        // SAFETY: single-threaded, at the top of main, before anything is
-        // spawned.
-        unsafe {
-            std::env::remove_var("NOTIFY_SOCKET");
-            std::env::remove_var("WATCHDOG_USEC");
-            std::env::remove_var("WATCHDOG_PID");
-        }
 
         // `WATCHDOG_PID`, when set, names who systemd meant the watchdog for.
         // Anyone else pinging it is answering for a process they are not.
-        let ours = pid.is_none_or(|pid| pid.parse() == Ok(std::process::id()));
-        let watchdog = usec
+        let ours = std::env::var("WATCHDOG_PID")
+            .ok()
+            .is_none_or(|pid| pid.parse() == Ok(std::process::id()));
+        let watchdog = std::env::var("WATCHDOG_USEC")
+            .ok()
             .filter(|_| ours)
             .and_then(|usec| usec.parse::<u64>().ok())
             .filter(|usec| *usec > 0)

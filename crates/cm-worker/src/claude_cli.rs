@@ -71,6 +71,13 @@ impl Claude for ClaudeCli {
             .arg("--effort")
             .arg(run.effort)
             .arg("--dangerously-skip-permissions")
+            // systemd's own variables do not go to the child. A process that
+            // can reach the notify socket can answer the watchdog on behalf of
+            // a parent that has stopped answering, and READY=1 from a child
+            // would be a lie systemd believes.
+            .env_remove("NOTIFY_SOCKET")
+            .env_remove("WATCHDOG_USEC")
+            .env_remove("WATCHDOG_PID")
             .current_dir(run.repo_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
