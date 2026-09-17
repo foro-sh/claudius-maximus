@@ -119,13 +119,15 @@ impl Worker<'_> {
             // may still be sitting on the last issue's branch — and every
             // other issue in this repo would fail the same way. Abandon the
             // repo for this sweep rather than spending a connect timeout per
-            // issue in it.
+            // issue in it. A repo that isn't on the box at all is cloned here,
+            // with the instance's own token: it is the only credential on the
+            // box that reaches a private repo.
             //
             // The branch this lands on is origin's default, whatever it is
             // called, and it is also the base the PR is opened against.
             let base = self
                 .git
-                .sync_default(&repo.clone_path, self.token)
+                .sync_default(&repo.clone_path, &clone_url(&repo.repo), self.token)
                 .with_context(|| format!("syncing {}", repo.repo))?;
 
             if let Err(err) = self.act(repo, &issue, action, &base).await {
@@ -494,6 +496,12 @@ worker's job, and the box has no credentials for you to do it with.
     fn log(&self, message: &str) {
         println!("{}: {message}", self.config.instance);
     }
+}
+
+/// Where a repo is cloned from. HTTPS, because the token is the only
+/// credential the worker has and an SSH remote would ask it for a key.
+fn clone_url(repo: &str) -> String {
+    format!("https://github.com/{repo}.git")
 }
 
 /// Names the repo as a whole for [`Notifier::post_once`]: listing its issues
@@ -1188,7 +1196,12 @@ mod tests {
         // which reads as a broken worker rather than as an empty run.
         struct CommitlessGit;
         impl GitOps for CommitlessGit {
-            fn sync_default(&self, _: &std::path::Path, _: &str) -> anyhow::Result<String> {
+            fn sync_default(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<String> {
                 Ok("main".to_string())
             }
             fn has_new_commits(
@@ -1243,7 +1256,12 @@ mod tests {
     async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
         struct UnpushableGit;
         impl GitOps for UnpushableGit {
-            fn sync_default(&self, _: &std::path::Path, _: &str) -> anyhow::Result<String> {
+            fn sync_default(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<String> {
                 Ok("main".to_string())
             }
             fn has_new_commits(
@@ -1532,6 +1550,7 @@ mod tests {
                 &self,
                 clone_path: &std::path::Path,
                 _: &str,
+                _: &str,
             ) -> anyhow::Result<String> {
                 if clone_path.ends_with("platform") {
                     anyhow::bail!("origin unreachable")
@@ -1612,8 +1631,10 @@ mod tests {
         assert_eq!(
             harness.git.calls(),
             vec![
-                "sync_default path=/clones/foro".to_string(),
-                "sync_default path=/clones/foro".to_string(),
+                "sync_default path=/clones/foro url=https://github.com/foro-sh/foro.git"
+                    .to_string(),
+                "sync_default path=/clones/foro url=https://github.com/foro-sh/foro.git"
+                    .to_string(),
             ],
             "an implementing run leaves HEAD on its own branch, so the next \
              issue is synced again rather than branching off it"

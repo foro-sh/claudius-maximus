@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision one Claudius instance: a unix user, its clones, its env file and
+# Provision one Claudius instance: a unix user, its env file and
 # its systemd unit. Run as root, from a checkout of this repo, once per
 # subscription you want draining a queue.
 #
@@ -15,14 +15,15 @@
 #
 # Clone paths default to /home/<name>/repos/<owner>/<repo> when REPOS entries
 # omit a path. Absolute paths are still accepted and must stay under that home.
+# The clones are not made here — the worker clones what is missing on its first
+# sweep, with its own token, which is what makes a private repo work.
 #
 # The two steps that need a human — `claude login` for that person's
 # subscription, and the worker's own GitHub device flow — are printed at the
 # end rather than automated: both are interactive, and both must run as the
 # person who actually holds the subscription.
 #
-# Safe to re-run for a given name: an existing user, clone or env file is
-# left alone.
+# Safe to re-run for a given name: an existing user or env file is left alone.
 set -euo pipefail
 
 die() { echo "add-instance: $*" >&2; exit 1; }
@@ -207,13 +208,10 @@ else
     echo "created user $user"
 fi
 
-for entry in "${!clones[@]}"; do
-    if [[ -d $entry ]]; then
-        echo "clone $entry already exists, leaving it alone"
-    else
-        sudo -u "$user" -H git clone "https://github.com/${clones[$entry]}.git" "$entry"
-    fi
-done
+# The clones themselves are the worker's job: its GitHub token is the only
+# credential on the box that reaches a private repo, and it does not exist
+# until the device flow at the end of this script. It clones whatever is
+# missing on its first sweep.
 
 install -d -o "$user" -g "$user" -m 755 "$home/claudius-maximus"
 install -o "$user" -g "$user" -m 755 "$binary" "$home/claudius-maximus/claudius-maximus"

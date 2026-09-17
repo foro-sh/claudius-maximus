@@ -274,11 +274,16 @@ impl FakeGit {
 }
 
 impl GitOps for FakeGit {
-    fn sync_default(&self, clone_path: &Path, _token: &str) -> anyhow::Result<String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("sync_default path={}", clone_path.display()));
+    fn sync_default(
+        &self,
+        clone_path: &Path,
+        remote_url: &str,
+        _token: &str,
+    ) -> anyhow::Result<String> {
+        self.calls.lock().unwrap().push(format!(
+            "sync_default path={} url={remote_url}",
+            clone_path.display()
+        ));
         Ok(self.default_branch.clone())
     }
 
