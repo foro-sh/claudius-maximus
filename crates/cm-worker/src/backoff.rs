@@ -1,6 +1,6 @@
 //! Per-issue backoff, so one issue that keeps failing stops eating the sweep.
 //!
-//! A failed issue keeps its trigger label and is retried on the next sweep —
+//! A failed issue keeps its trigger label and is retried on the next sweep,
 //! that is the design, and for a transient failure it is the right one. But the
 //! retry is a whole Claude run, so an issue that fails *every* time spends
 //! minutes of a shared subscription quota on the same failure before the sweep
@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Doublings before the wait stops growing — 2^6 sweeps, so just over an hour
-/// at the default one-minute interval. Long enough that a stuck issue costs
+/// Doublings before the wait stops growing (2^6 sweeps, so just over an hour
+/// at the default one-minute interval). Long enough that a stuck issue costs
 /// nothing, short enough that a fixed one is picked up while someone is still
 /// watching for it.
 const MAX_DOUBLINGS: u32 = 6;

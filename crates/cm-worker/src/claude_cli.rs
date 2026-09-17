@@ -1,4 +1,4 @@
-//! The one place `std::process::Command` runs, per #1 — `claude` has no
+//! The one place `std::process::Command` runs, per #1: `claude` has no
 //! Rust SDK, unlike GitHub (`cm-github`) and git (`cm-git`).
 use anyhow::Context;
 use std::io::Write;
@@ -30,7 +30,7 @@ impl Claude for ClaudeCli {
     ) -> anyhow::Result<String> {
         // The prompt goes in on stdin, not as an argument: it carries the
         // issue body and the plan, and Linux caps a single argv entry at
-        // 128KiB — a long pasted log in an issue would be `E2BIG` forever.
+        // 128KiB, and a long pasted log in an issue would be `E2BIG` forever.
         let mut child = Command::new("claude")
             .arg("-p")
             .arg("--model")
@@ -72,7 +72,7 @@ impl Claude for ClaudeCli {
         // it to reuse the same branch.
         match written {
             Ok(result) => result.context(
-                "claude stopped reading before the whole prompt was in — it answered a \
+                "claude stopped reading before the whole prompt was in: it answered a \
                  truncated prompt, so the run is being retried",
             )?,
             Err(_) => anyhow::bail!("the thread feeding claude its prompt panicked"),

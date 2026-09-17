@@ -5,13 +5,13 @@
 #   systemctl enable --now claudius@claudius-tertius   (Claudius Tertius)
 # add-instance.sh assigns those Latin-ordinal names (cap 100).
 # One instance per Claude subscription, and as many as there are
-# subscriptions — systemd runs the set, nothing supervises them from inside
+# subscriptions. systemd runs the set, nothing supervises them from inside
 # the binary. Each user has its own $HOME, which is what scopes the
 # subscription OAuth credentials and the GitHub device-flow token
-# (~/.claudius-maximus/github-token) — that is the whole reason an
+# (~/.claudius-maximus/github-token): that is the whole reason an
 # instance is a unix user and not just another env file. `add-instance.sh`
 # provisions one end to end.
-Description=Claudius (%i) — Claude Code GitHub issue worker (plan-then-implement, subscription OAuth)
+Description=Claudius (%i): Claude Code GitHub issue worker (plan-then-implement, subscription OAuth)
 After=network-online.target
 Wants=network-online.target
 
@@ -20,14 +20,14 @@ Type=simple
 User=%i
 Group=%i
 WorkingDirectory=/home/%i
-# Subscription OAuth must win — ANTHROPIC_API_KEY must NOT be set anywhere here.
+# Subscription OAuth must win: ANTHROPIC_API_KEY must NOT be set anywhere here.
 Environment=HOME=/home/%i
 Environment=PATH=/home/%i/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=CLAUDE_CODE_RETRY_WATCHDOG=1
 # Per-instance config, including which $LABEL this instance owns, its $INSTANCE
 # display name, and the GIT_AUTHOR_*/GIT_COMMITTER_* identity commits are
 # attributed to (that email must be verified on the instance's GitHub account).
-# Values with spaces need quoting in this file too — unquoted, a name like
+# Values with spaces need quoting in this file too: unquoted, a name like
 # "Daniel Steman" loses its second word.
 EnvironmentFile=/etc/%i.env
 ExecStart=/home/%i/claudius-maximus/claudius-maximus

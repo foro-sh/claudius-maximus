@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks add-instance.sh's config validation — the half that runs before it
+# Checks add-instance.sh's config validation, the half that runs before it
 # needs root. A valid config gets as far as the root check; a bad one must not.
 set -uo pipefail
 cd "$(dirname "$0")"

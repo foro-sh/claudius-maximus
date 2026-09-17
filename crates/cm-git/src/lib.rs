@@ -10,7 +10,7 @@ use git2::{
     ResetType,
 };
 
-/// Everything the worker needs from git — no `git` CLI, per #1. Claude makes
+/// Everything the worker needs from git (no `git` CLI, per #1). Claude makes
 /// the commits (with its own git, inside the clone); the worker only syncs the
 /// clone and pushes the finished branch, which is the half that needs the
 /// instance's OAuth token.
@@ -37,7 +37,7 @@ pub trait GitOps: Send + Sync {
     ) -> anyhow::Result<String>;
 
     /// True if `branch` exists locally and carries commits `base` does not.
-    /// False for a branch that was never created — a Claude run that committed
+    /// False for a branch that was never created: a Claude run that committed
     /// nothing leaves one or the other, and neither is a pull request.
     fn has_new_commits(&self, clone_path: &Path, branch: &str, base: &str) -> anyhow::Result<bool>;
 
@@ -80,7 +80,7 @@ impl GitOps for Git2Ops {
             .peel_to_commit()?;
 
         // A forced reference update rather than `Repository::branch`, which
-        // refuses to force a branch that is already HEAD — the common case
+        // refuses to force a branch that is already HEAD: the common case
         // here, since the worker re-syncs a branch it is already sitting on.
         repo.reference(
             &format!("refs/heads/{default}"),
@@ -93,7 +93,7 @@ impl GitOps for Git2Ops {
         // `reset --hard` leaves behind: the worker reuses one clone across
         // issues, so whatever a killed Claude run dropped in the tree would
         // otherwise be swept into the next issue's commits by Claude.
-        // Ignored files (`target/`) stay — that's the build cache.
+        // Ignored files (`target/`) stay: that's the build cache.
         // `reset` can't do it in one step; it overrides the checkout strategy
         // it is handed.
         let mut checkout = CheckoutBuilder::new();
@@ -140,8 +140,8 @@ impl GitOps for Git2Ops {
 /// The clone at `clone_path`, cloned from `remote_url` if it isn't there yet.
 ///
 /// Only a missing directory is cloned into: a path that exists but holds no
-/// repository is a provisioning mistake — most likely two instances pointed at
-/// one tree — and cloning over it would bury the evidence.
+/// repository is a provisioning mistake, most likely two instances pointed at
+/// one tree, and cloning over it would bury the evidence.
 fn open_or_clone(clone_path: &Path, remote_url: &str, token: &str) -> Result<Repository> {
     if clone_path.exists() {
         return Repository::open(clone_path)

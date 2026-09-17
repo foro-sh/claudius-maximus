@@ -7,20 +7,20 @@
 A single long-running binary that continuously turns labeled GitHub issues into
 PRs using a Claude Code **subscription** (OAuth, not `ANTHROPIC_API_KEY`),
 plan-then-implement, to max out the rolling 5h usage window. No webhook, no
-Tailscale Funnel, no queue daemon — a poll loop over the GitHub API with GitHub
+Tailscale Funnel, no queue daemon: a poll loop over the GitHub API with GitHub
 labels as the only state. The worker only makes outbound calls, so it needs no
 inbound tunnel. Status updates post to Mattermost if configured.
 
 One **instance** = one subscription = one unix user, run from the
 `claudius@.service` template. Beyond one subscription's rolling window,
-throughput comes from adding instances — any number of them, each draining its
-own label. `add-instance.sh` provisions one; see
+throughput comes from adding instances (any number of them, each draining its
+own label). `add-instance.sh` provisions one; see
 [Adding an instance](#adding-an-instance).
 
 It started as a bash script (`infra/claudius-maximus/`) in a private monorepo
 and is being ported to Rust here: `octocrab` for the GitHub API over device-flow
 OAuth, `git2` for git, and `std::process::Command` reserved for the `claude` CLI
-alone — so the box needs neither the `gh` CLI nor a `git` binary. The port is in
+alone, so the box needs neither the `gh` CLI nor a `git` binary. The port is in
 progress under
 [#1](https://github.com/foro-sh/claudius-maximus/issues/1); this README
 describes the binary that issue specifies.
@@ -29,34 +29,34 @@ describes the binary that issue specifies.
 
 | Issue state                                    | Worker action                                                                                            |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Opened by an author outside the repo's allowlist | Skipped outright, before planning — see "Who may file an issue CM acts on"                               |
+| Opened by an author outside the repo's allowlist | Skipped outright, before planning; see "Who may file an issue CM acts on"                               |
 | Blocked by an open issue (GitHub relationship)  | Skipped until every blocker closes                                                                        |
 | Labeled `claudius-maximus`, not yet `:planned`  | Claude posts an implementation plan, adds `claudius-maximus:planned`                                      |
 | `:planned`                                      | Claude implements and commits on `claude/issue-N`; the worker pushes it and opens the PR (`Closes #N`), adds `:done`, removes the trigger label |
 | `claudius-maximus:done`                         | ignored                                                                                                   |
 
 Quota exhaustion is handled by Claude (`CLAUDE_CODE_RETRY_WATCHDOG=1`): it waits
-for the window to reset and resumes. A reboot loses nothing — all state is in
+for the window to reset and resumes. A reboot loses nothing: all state is in
 labels.
 
 ### Multiple repos
 
 `REPOS` takes a list, and one worker serves all of it: a sweep walks the repos in
 the configured order, drains each one's backlog, then sleeps. Adding a repo
-widens what that one worker looks at — it does **not** start a second Claude
+widens what that one worker looks at. It does **not** start a second Claude
 process, so an instance stays serial on its single subscription. (Adding an
 *instance* is the thing that adds a process; see
 [Adding an instance](#adding-an-instance).)
 
 Each repo needs its own clone and its own copy of the three labels; the state
 machine above then runs per repo, independently. Because issue numbers repeat
-across repos, logs and Mattermost lines are qualified — `foro-sh/foro#12`, not
+across repos, logs and Mattermost lines are qualified: `foro-sh/foro#12`, not
 `#12`.
 
 ### Who may file an issue CM acts on
 
 A `$REPOS` entry can end in a third field: a `|`-separated allowlist of issue
-**authors**. Issues opened by anyone else are skipped outright — before planning,
+**authors**. Issues opened by anyone else are skipped outright, before planning,
 before any `claude` call.
 
 ```
@@ -65,7 +65,7 @@ foro-sh/foro=/home/claudius-maximus/repos/foro=danielsteman|thijssdaniels
 
 A **public** repo needs this gate: without it, a stranger's issue would become a
 Claude prompt the moment someone applied the label. A private repo can go
-without one — filing already requires access. This is the only gate on who can
+without one: filing already requires access. This is the only gate on who can
 trigger an implementation: applying the trigger label is sufficient, there is
 no separate approval step. Logins are matched case-insensitively.
 
@@ -86,7 +86,7 @@ the only thing that has to exist on the server besides the binary is Claude Code
 ## One-time server setup (run as `claudius-maximus`)
 
 This is the first instance, set up by hand. Every step here is **per
-instance** — each further subscription repeats all of it as its own unix user,
+instance**: each further subscription repeats all of it as its own unix user,
 with its own label triad, which is what `add-instance.sh` automates
 ([Adding an instance](#adding-an-instance)). Prefer that script even for the
 first slot: it assigns `claudius-maximus` and wires user, label, and display
@@ -98,7 +98,7 @@ npm install -g @anthropic-ai/claude-code
 claude login && claude doctor
 unset ANTHROPIC_API_KEY            # and remove it from any profile/env
 
-# 2. Drop the binary in place. (The clones are the worker's own job — it
+# 2. Drop the binary in place. (The clones are the worker's own job, it
 #    makes them on its first sweep, with its own token.)
 mkdir -p /home/claudius-maximus/claudius-maximus
 cd /home/claudius-maximus/claudius-maximus
@@ -110,7 +110,7 @@ chmod +x claudius-maximus     # or scp your own target/release/claudius-maximus 
 **GitHub login is the binary's own job.** On first run it starts GitHub's OAuth
 device flow: it prints a one-time code and a verification URL, you open the URL
 once as the account this instance acts as, and the token is stored in
-`$HOME/.claudius-maximus/github-token` (mode `0600`) — not in
+`$HOME/.claudius-maximus/github-token` (mode `0600`), not in
 `/etc/claudius-<user>.env`. A file rather than the OS keyring because the
 instance is a `nologin` user under systemd, with no login session and no Secret
 Service for a keyring to live in; `$HOME` already holds that instance's Claude
@@ -119,7 +119,7 @@ one-time ceremony `gh auth login` used to be, with no `gh` CLI on the box at all
 Run it in the foreground once before enabling the unit, so you can complete the
 flow. It validates its config before anything else, so write
 [`/etc/claudius-maximus.env`](#config) first and source it for this one
-run — systemd reads it for you afterwards:
+run; systemd reads it for you afterwards:
 
 ```bash
 set -a; . /etc/claudius-maximus.env; set +a
@@ -128,12 +128,12 @@ set -a; . /etc/claudius-maximus.env; set +a
 
 The account must have write access to every repo in `$REPOS` (org member or
 collaborator, `read:org` for org repos): the worker pushes `claude/*` branches
-with this token and opens the PRs as this account. Claude itself never pushes —
+with this token and opens the PRs as this account. Claude itself never pushes:
 there are no git credentials in the clone for it to use, and no `gh` on the box.
 
 The three labels (`$LABEL`, `:planned`, `:done`) must exist in every repo the
 instance serves. Create them from GitHub's web UI or with `gh` from your own
-workstation — the worker reads and moves them, it never creates them, and
+workstation. The worker reads and moves them, it never creates them, and
 nothing on the box needs `gh` for this.
 
 The worker uses `--dangerously-skip-permissions` for both planning and
@@ -142,7 +142,7 @@ interactive approval prompts for GitHub/network access.
 
 ## Config
 
-`/etc/<user>.env` — one per instance, named after the unix user the instance
+`/etc/<user>.env`, one per instance, named after the unix user the instance
 runs as, so `/etc/claudius-maximus.env` (chmod 640, owned by `claudius-maximus`).
 `add-instance.sh` sets `LABEL` and `INSTANCE` from that same name; you should
 not invent a separate queue name.
@@ -159,14 +159,14 @@ IMPLEMENT_EFFORT=high            # optional; low|medium|high|xhigh|max
 POLL_INTERVAL=60                 # optional, seconds
 CLAUDIUS_CLAIM_DIR=/tmp          # optional; where the $LABEL lock lives, see below
 CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=http://localhost:8065/hooks/xxxx   # optional
-# Commit attribution — must be a verified email on this instance's GitHub account.
+# Commit attribution: must be a verified email on this instance's GitHub account.
 GIT_AUTHOR_NAME="Daniel Steman"
 GIT_AUTHOR_EMAIL=daniel-steman@live.nl
 GIT_COMMITTER_NAME="Daniel Steman"
 GIT_COMMITTER_EMAIL=daniel-steman@live.nl
 ```
 
-Same env-var surface as the bash worker, plus `GITHUB_CLIENT_ID` — the bash
+Same env-var surface as the bash worker, plus `GITHUB_CLIENT_ID`. The bash
 worker leaned on `gh`'s own OAuth app, this one has no `gh` to borrow from. It is
 a client id, not a secret: device flow has no client secret, and every instance
 shares the one app (the device flow is what makes each a different *account*).
@@ -174,11 +174,11 @@ Create it once under Settings → Developer settings → OAuth Apps with "Enable
 Device Flow" ticked. No GitHub token here: that lives in the instance's home.
 
 The `GIT_*` identity lives here rather than in the unit because it differs per
-instance — each instance commits as its own account holder. Quote values
+instance: each instance commits as its own account holder. Quote values
 containing spaces; unquoted, systemd drops everything after the space.
 
 `REPOS` is a comma-separated list of
-`owner/name[=/abs/path/to/clone][=author|author]` entries — **no spaces**. When
+`owner/name[=/abs/path/to/clone][=author|author]` entries, **no spaces**. When
 the path is omitted, `add-instance.sh` expands it to
 `/home/<instance>/repos/<owner>/<name>` and writes the absolute form into the env file
 (the worker still requires absolute paths). A malformed entry aborts the worker
@@ -203,19 +203,19 @@ journalctl -u claudius@claudius-maximus -f
 
 On start, the instance posts ":crown: awake" to Mattermost (listing the repos it
 will drain), then ":scroll: planned ORG/REPO#N" / ":white_check_mark: shipped
-ORG/REPO#N" / ":warning: ORG/REPO#N failed" per issue — all under its `$INSTANCE`
+ORG/REPO#N" / ":warning: ORG/REPO#N failed" per issue, all under its `$INSTANCE`
 name, so several instances in one channel stay tellable apart.
 
 Migrating a box that runs the bash worker: stop the unit, `scp` the binary next
 to (or over) `worker.sh`, complete the device-flow login once in the foreground,
 point `ExecStart` at the binary, `systemctl daemon-reload && systemctl restart`.
 The env file, labels, clones and in-flight issue state all carry over unchanged
-— `worker.sh`, `repos.sh` and the `gh` CLI can then go.
+`worker.sh`, `repos.sh` and the `gh` CLI can then go.
 
 ## Adding an instance
 
 One subscription's rolling 5h window is the throughput ceiling for a single
-instance — it drains serially, one issue per sweep. Throughput past that comes
+instance: it drains serially, one issue per sweep. Throughput past that comes
 from adding instances: each one is a *separate subscription*, held by a separate
 person, on a separate GitHub account. There is no fixed number of them. The box
 runs as many as you have subscriptions for.
@@ -223,10 +223,10 @@ runs as many as you have subscriptions for.
 **The instance boundary is a unix user.** Not an env var: `$HOME` is what scopes
 the Claude subscription OAuth credentials *and* the file the GitHub token
 lands in, so N subscriptions means N homes. Nothing supervises them from inside
-the binary — one process serves one subscription, and systemd runs the set.
+the binary: one process serves one subscription, and systemd runs the set.
 `add-instance.sh` picks the unix user from a fixed Latin-ordinal list
 (`claudius-maximus`, `claudius-secundus`, … `claudius-centesimus`, cap 100) and
-uses that same string as `$LABEL` and — title-cased — as `$INSTANCE`, so you
+uses that same string as `$LABEL` and, title-cased, as `$INSTANCE`, so you
 never invent or align three names by hand. The template unit takes that user as
 its instance name: `claudius@claudius-maximus`, `claudius@claudius-secundus`,
 `claudius@claudius-tertius`.
@@ -236,12 +236,12 @@ same label and both would plan the same issue, then both would implement it and
 open competing PRs. The second one to start won't get that far: each worker takes
 an OS lock on `/tmp/claudius-label-<label>.lock` before its first sweep and exits
 with `label <label> is already being drained by <instance>` if a live worker
-holds it — so the mistake shows up as a failed unit, seconds after `systemctl
+holds it, so the mistake shows up as a failed unit, seconds after `systemctl
 start`, rather than as duplicate PRs. Point the lock somewhere other than `/tmp`
 with `CLAUDIUS_CLAIM_DIR` (any directory every instance on the box can write). It
 is a same-box guard only: two workers on different machines still need disjoint
 labels, which is the config discipline below. Each instance owns its own label
-triad exclusively — `$LABEL` plus the `:planned` and `:done` state labels the
+triad exclusively: `$LABEL` plus the `:planned` and `:done` state labels the
 worker derives from it, so the third instance reads and writes
 `claudius-tertius:planned` / `:done`.
 
@@ -249,13 +249,13 @@ An instance also only looks at the repos in **its own** `$REPOS`. The lists need
 not match, and usually shouldn't all be the same.
 
 Each instance must be logged in as the person who actually holds that
-subscription — `claude login` on their own account, not a shared credential, and
+subscription: `claude login` on their own account, not a shared credential, and
 its own device-flow login for GitHub.
 
 ### Setup
 
-`add-instance.sh` does the mechanical half — the unix user, its env file, the
-unit — and prints the rest. Run it as root from a checkout, once per
+`add-instance.sh` does the mechanical half (the unix user, its env file, the
+unit) and prints the rest. Run it as root from a checkout, once per
 subscription. With no name argument it takes the next free slot from the ordinal
 list; pass a known name explicitly only to re-run / repair that slot.
 
@@ -283,7 +283,7 @@ must stay under the instance's own `$HOME`.
 It validates the config before it creates anything: a `$REPOS` typo, a relative
 clone path, a label another instance's env file already claims, or a clone path
 outside the new user's `$HOME` all abort with nothing written. That last one is
-not a style rule — two workers sharing a working tree both check out branches and
+not a style rule: two workers sharing a working tree both check out branches and
 hard-reset onto origin's default, and one tree corrupts the other. Re-running a
 named slot is safe; an existing user or env file is left alone. A plain re-run
 with no args provisions the *next* free name.
@@ -328,7 +328,7 @@ journalctl -u claudius@claudius-tertius -f
   `add-instance.sh` refuses a label another `/etc/claudius-*.env` already claims,
   and the worker's startup lock catches the rest.
 - **Each instance's GitHub account needs write access** to every repo in its
-  `REPOS` (org member or collaborator) — the worker pushes `claude/*` branches
+  `REPOS` (org member or collaborator); the worker pushes `claude/*` branches
   and opens PRs with that account's token.
 - **All three of its labels must exist** in every repo it serves, before it runs.
 - **No two instances share a clone.** One working tree per instance per repo,
@@ -340,7 +340,7 @@ journalctl -u claudius@claudius-tertius -f
 ### Routing work between the queues
 
 Which label you apply decides which subscription implements the issue. That split
-is deliberately manual — assign labels evenly by hand and the queues stay
+is deliberately manual: assign labels evenly by hand and the queues stay
 balanced; there is no automatic distribution and none is wanted.
 
 Dependencies work across queues without any special handling: the blocked check
@@ -368,7 +368,7 @@ spending subscription quota. CI runs `cargo fmt --check`, `cargo clippy
 Every repo in `$REPOS` needs all of these:
 
 - A `CLAUDE.md` documenting branch convention, test/lint commands, and "do not
-  merge — human review required". The worker tells Claude to follow it.
+  merge, human review required". The worker tells Claude to follow it.
 - Branch protection on the default branch: PR required; Claude only pushes
   `claude/*`. The worker reads that branch off origin's HEAD, so a repo on
   `trunk` or `master` needs no configuration.
@@ -378,8 +378,8 @@ Every repo in `$REPOS` needs all of these:
 - An author allowlist in `$REPOS` if the repo is public, so a stranger's issue
   can't become a Claude prompt.
 - Nothing else. The worker clones the repo itself on its first sweep, at the
-  path given in `$REPOS`, using its own token — which is what makes a private
-  repo work without a credential stored on the box. **Per instance** — two
+  path given in `$REPOS`, using its own token, which is what makes a private
+  repo work without a credential stored on the box. **Per instance**: two
   workers must never share a working tree, and a `$REPOS` path that exists but
   holds no clone is refused rather than cloned over. An existing clone is
   reused as it stands, and its `origin` **must be an HTTPS URL**: the token is
@@ -389,41 +389,41 @@ Every repo in `$REPOS` needs all of these:
 ## Known ceilings
 
 - **Nothing enforces Conventional Commits locally.** Claude makes the commits
-  with the repo's own `git`, so a `commit-msg` hook fires if the repo has one —
+  with the repo's own `git`, so a `commit-msg` hook fires if the repo has one,
   but the prompt is the only thing that asks for a conforming message, and the
   target repo's commitlint CI job is what actually catches a bad one, after the
   PR is open.
 - **Serial within an instance, one issue per sweep.** Extra repos are visited in
-  order within a sweep, so a large first repo delays the ones after it — reorder
+  order within a sweep, so a large first repo delays the ones after it. Reorder
   `$REPOS` to change priority. Concurrency *inside* one instance is a non-goal;
   scale out with another instance instead.
 - **Instances coordinate on exactly one thing: the label.** Each worker takes an
   OS lock on `/tmp/claudius-label-<label>.lock` at startup and refuses to run if
   another live worker holds it, so a duplicated `$LABEL` stops at the second unit
-  instead of reaching GitHub as competing PRs. Nothing else is shared — no work
-  distribution, no view of what the other is doing — and the guard is per box: two
+  instead of reaching GitHub as competing PRs. Nothing else is shared (no work
+  distribution, no view of what the other is doing), and the guard is per box: two
   workers on *different* machines with the same label still collide.
 - **Balancing is a human job by design.** Nothing redistributes work, so an
   instance idles when nobody labels for it. Assign labels evenly; that's the
   mechanism.
 - **No approval gate between plan and implement, by design.** Applying the
   trigger label is the only human action required; nobody has to approve the
-  plan. The plan comment is not decoration, though — the implementing sweep
+  plan. The plan comment is not decoration, though: the implementing sweep
   reads it back off the issue and hands it to Claude, together with the issue
   itself, since the box has no GitHub access of its own. Editing the plan
   comment before the next sweep is the one way to steer the implementation;
   only comments the instance's own GitHub account wrote are read, so nobody
   else can post a plan for it to follow. Leave the `:crown: Plan by …` line (or
-  the HTML marker under it) in place when you edit — one of the two is how the
+  the HTML marker under it) in place when you edit: one of the two is how the
   next sweep finds the plan again. Delete the comment and the issue is simply
   planned again. There is currently no way to plan an issue without
   also implementing it.
-- **`--dangerously-skip-permissions`** during implement — acceptable on an
+- **`--dangerously-skip-permissions`** during implement, acceptable on an
   isolated, unprivileged box; tighten with a `settings.json` allowlist otherwise.
 - **Retry on failure is whole-issue, and backs off.** A failed implement
   re-runs; Claude is told to reuse the existing branch/PR rather than duplicate
-  it. The wait doubles per consecutive failure on the same issue — one
-  `$POLL_INTERVAL`, then two, up to 64 — because the retry is a whole Claude
+  it. The wait doubles per consecutive failure on the same issue (one
+  `$POLL_INTERVAL`, then two, up to 64) because the retry is a whole Claude
   run and one permanently stuck issue would otherwise spend the quota the rest
   of the backlog needs. Any success on that issue resets it, and so does
   restarting the worker: the counters are in memory, GitHub holds the state

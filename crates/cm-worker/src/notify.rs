@@ -30,7 +30,7 @@ impl Notifier {
     /// issue in it. Posting each of those once says the same thing as posting
     /// them a thousand times a day, and stays readable.
     ///
-    /// `key` names what is failing — a repo, or one issue at one stage — and
+    /// `key` names what is failing (a repo, or one issue at one stage), and
     /// deliberately not *why*: the commonest error carries a whole `claude`
     /// stderr, which varies run to run, so keying on it would post every sweep
     /// and keep a copy of each message for the life of the process.
@@ -54,7 +54,7 @@ impl Notifier {
     }
 
     /// Posts to Mattermost if configured. Never fails the worker on a bad
-    /// post — a dead webhook must not stop the backlog from draining.
+    /// post: a dead webhook must not stop the backlog from draining.
     pub fn post(&self, text: &str) {
         self.deliver(text);
     }

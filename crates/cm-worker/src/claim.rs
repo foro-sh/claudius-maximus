@@ -1,7 +1,7 @@
 //! Single-instance-per-label claim. Port of `worker.sh`'s `claim_label`.
 //!
 //! Two workers sharing one `$LABEL` both plan, both implement, and open
-//! competing PRs on the same issue — the one failure mode the two-instance
+//! competing PRs on the same issue: the one failure mode the two-instance
 //! design has no runtime defence against. Claiming the label at startup turns
 //! that config mistake into a dead unit in `systemctl status` within seconds
 //! instead of duplicate PRs noticed days later.
@@ -39,10 +39,10 @@ pub fn claim_label(
     let path = claim_path(claim_dir, label);
 
     // A symlink here is either a mistake or a local user aiming our truncation
-    // at a file of their choosing — refuse either way rather than follow it.
+    // at a file of their choosing: refuse either way rather than follow it.
     if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_symlink()) {
         return Err(ClaimError::Fatal(anyhow::anyhow!(
-            "claim path {} is a symlink — refusing to write through it",
+            "claim path {} is a symlink, refusing to write through it",
             path.display()
         )));
     }
@@ -70,7 +70,7 @@ pub fn claim_label(
     }
 
     // Whoever held this before us is gone (the kernel dropped their lock), so
-    // their name in the file is stale — overwrite it with ours.
+    // their name in the file is stale, so overwrite it with ours.
     std::fs::write(&path, format!("{instance} (pid {})\n", std::process::id())).map_err(|err| {
         ClaimError::Fatal(anyhow::anyhow!(
             "cannot name claim file {}: {err}",
