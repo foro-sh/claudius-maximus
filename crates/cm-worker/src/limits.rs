@@ -7,9 +7,11 @@
 //! on a reset looks exactly like a hung one from outside, for up to five
 //! hours.
 //!
-//! So this module reads, and only reads. Every line of a run goes past
-//! [`classify`], and what it recognises turns into a status change, a journal
-//! line and one Mattermost message. Recognising nothing changes no behaviour
+//! So this module reads, and only reads. Every line a run writes to *stderr*
+//! goes past [`classify`], and what it recognises turns into a status change, a
+//! journal line and one Mattermost message. Stderr only: a plan goes to stdout,
+//! and a plan for an issue about usage windows says "usage limit reached" in as
+//! many words. Recognising nothing changes no behaviour
 //! at all: the run still waits, still resumes, still ships. That is
 //! deliberate. The `claude` CLI's wording is not an API, so this is the one
 //! place in the worker allowed to be a best guess, and it is arranged so that

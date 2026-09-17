@@ -711,9 +711,18 @@ impl RunObserver for RunWatch<'_> {
         // implement run's chatter): it feeds the register, which keeps the
         // last line, and that is enough to tell a working run from a stuck
         // one without copying a plan into the journal twice.
-        if stream == Stream::Stderr && !line.trim().is_empty() {
+        if stream != Stream::Stderr {
+            return;
+        }
+        if !line.trim().is_empty() {
             self.log(&format!("{} claude: {line}", self.subject));
         }
+        // Only stderr is read for window notices, and this is not a detail. A
+        // plan is written to stdout, and a plan for an issue about usage
+        // windows says "usage limit reached" in as many words: this very repo
+        // would park itself on an imaginary reset. The CLI says what it is
+        // waiting for on the channel it says everything else it is worried
+        // about on.
         match limits::classify(line) {
             Some(Signal::Spent(spent)) => self.spent(&spent),
             Some(Signal::Resumed) => self.reopened(),
@@ -1087,6 +1096,30 @@ mod tests {
             vec![LABEL.to_string(), format!("{LABEL}:planned")],
             "waiting out a window is not failing: the issue was planned"
         );
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_talks_about_usage_limits_is_not_a_usage_limit() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            // A plan for an issue about usage windows, on stdout, where plans
+            // go. This repo would otherwise park itself on an imaginary reset
+            // the first time it planned its own backlog.
+            FakeClaude::with_plan(
+                "## Plan\nHandle the case where claude says 'Claude AI usage limit reached'.",
+            ),
+        );
+
+        harness.sweep().await;
+
+        let snapshot = harness.snapshot();
+        assert!(!snapshot.window.is_shut(), "{:?}", snapshot.window);
+        assert_eq!(snapshot.counters.windows_shut, 0);
     }
 
     #[tokio::test]
