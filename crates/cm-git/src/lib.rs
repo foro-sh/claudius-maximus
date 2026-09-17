@@ -6,7 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use git2::build::CheckoutBuilder;
 use git2::{
-    BranchType, Cred, Direction, FetchOptions, PushOptions, RemoteCallbacks, Repository, ResetType,
+    BranchType, Cred, Direction, ErrorCode, FetchOptions, PushOptions, RemoteCallbacks, Repository,
+    ResetType,
 };
 
 /// Everything the worker needs from git — no `git` CLI, per #1. Claude makes
@@ -24,6 +25,11 @@ pub trait GitOps: Send + Sync {
     /// is opened against, and a repo whose default is not `main` would
     /// otherwise get a PR aimed at a branch that does not exist.
     fn sync_default(&self, clone_path: &Path, token: &str) -> anyhow::Result<String>;
+
+    /// True if `branch` exists locally and carries commits `base` does not.
+    /// False for a branch that was never created — a Claude run that committed
+    /// nothing leaves one or the other, and neither is a pull request.
+    fn has_new_commits(&self, clone_path: &Path, branch: &str, base: &str) -> anyhow::Result<bool>;
 
     /// Push `branch` to `origin` over HTTPS, authenticated with `token`
     /// (the same OAuth token `cm-github`'s client holds).
@@ -87,6 +93,25 @@ impl GitOps for Git2Ops {
         repo.checkout_tree(upstream.as_object(), Some(&mut checkout))?;
         repo.reset(upstream.as_object(), ResetType::Hard, None)?;
         Ok(default)
+    }
+
+    fn has_new_commits(&self, clone_path: &Path, branch: &str, base: &str) -> Result<bool> {
+        let repo = Repository::open(clone_path)?;
+        let head = match repo.find_branch(branch, BranchType::Local) {
+            Ok(branch) => branch.into_reference().peel_to_commit()?.id(),
+            // The one error worth its own answer: Claude never made the
+            // branch. Anything else is a broken clone and says so.
+            Err(err) if err.code() == ErrorCode::NotFound => return Ok(false),
+            Err(err) => return Err(err).with_context(|| format!("looking up branch {branch}")),
+        };
+        let base = repo
+            .find_branch(base, BranchType::Local)
+            .with_context(|| format!("looking up base branch {base}"))?
+            .into_reference()
+            .peel_to_commit()?
+            .id();
+        let (ahead, _behind) = repo.graph_ahead_behind(head, base)?;
+        Ok(ahead > 0)
     }
 
     fn push(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
@@ -168,15 +193,6 @@ mod tests {
         (tmp, clone)
     }
 
-    /// Checks out `branch` off HEAD in `clone` — what a Claude run does inside
-    /// the synced clone before it commits anything.
-    fn branch_off_head(clone: &Path, branch: &str) {
-        let repo = Repository::open(clone).unwrap();
-        let head = repo.head().unwrap().peel_to_commit().unwrap();
-        repo.branch(branch, &head, true).unwrap();
-        repo.set_head(&format!("refs/heads/{branch}")).unwrap();
-    }
-
     #[test]
     fn sync_default_checks_out_the_detected_default_branch() {
         // Deliberately not `main`: the default branch has to be detected, and
@@ -218,6 +234,55 @@ mod tests {
         );
         assert!(!clone.join("junk.txt").exists());
         assert!(!clone.join("leftovers/scratch.txt").exists());
+    }
+
+    /// Checks out `branch` off HEAD in `clone`, so the fixture can hand
+    /// `has_new_commits` the two shapes a Claude run leaves behind.
+    fn branch_off_head(clone: &Path, branch: &str) {
+        let repo = Repository::open(clone).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch(branch, &head, true).unwrap();
+        repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+    }
+
+    #[test]
+    fn has_new_commits_is_false_for_a_branch_claude_never_made() {
+        let (_tmp, clone) = fixture("main");
+        let base = Git2Ops.sync_default(&clone, TOKEN).unwrap();
+
+        assert!(
+            !Git2Ops
+                .has_new_commits(&clone, "claude/issue-1", &base)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn has_new_commits_is_false_for_a_branch_with_nothing_on_it() {
+        let (_tmp, clone) = fixture("main");
+        let base = Git2Ops.sync_default(&clone, TOKEN).unwrap();
+        branch_off_head(&clone, "claude/issue-1");
+
+        assert!(
+            !Git2Ops
+                .has_new_commits(&clone, "claude/issue-1", &base)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn has_new_commits_is_true_once_something_is_committed() {
+        let (_tmp, clone) = fixture("main");
+        let base = Git2Ops.sync_default(&clone, TOKEN).unwrap();
+        branch_off_head(&clone, "claude/issue-1");
+        fs::write(clone.join("fix.txt"), "the change\n").unwrap();
+        commit_all(&Repository::open(&clone).unwrap(), "fix: the thing");
+
+        assert!(
+            Git2Ops
+                .has_new_commits(&clone, "claude/issue-1", &base)
+                .unwrap()
+        );
     }
 
     /// Needs a real remote and a real token; run with

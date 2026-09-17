@@ -374,6 +374,15 @@ worker's job, and the box has no credentials for you to do it with.
                 fenced(plan)
             ),
         )?;
+        // A run that committed nothing has no pull request in it. Pushing
+        // anyway gets GitHub's "no commits between" 422, which reads like a
+        // broken worker rather than like the one thing that actually happened.
+        if !self.git.has_new_commits(&repo.clone_path, &branch, base)? {
+            anyhow::bail!(
+                "claude committed nothing to {branch} — nothing to open a pull request with, \
+                 retrying next sweep"
+            );
+        }
         self.ship(repo, issue, &branch, base).await
     }
 
@@ -1174,11 +1183,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_that_commits_nothing_opens_no_pull_request() {
+        // Pushing the branch anyway earns GitHub's "no commits between" 422,
+        // which reads as a broken worker rather than as an empty run.
+        struct CommitlessGit;
+        impl GitOps for CommitlessGit {
+            fn sync_default(&self, _: &std::path::Path, _: &str) -> anyhow::Result<String> {
+                Ok("main".to_string())
+            }
+            fn has_new_commits(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<bool> {
+                Ok(false)
+            }
+            fn push(&self, _: &std::path::Path, branch: &str, _: &str) -> anyhow::Result<()> {
+                panic!("pushed {branch} with nothing on it")
+            }
+        }
+
+        let config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        let github = FakeGithub::new(vec![
+            FakeIssue::new(
+                "foro-sh/foro",
+                7,
+                "danielsteman",
+                &[LABEL, &format!("{LABEL}:planned")],
+            )
+            .with_comment(&plan_comment("Claudius Maximus", LABEL)),
+        ]);
+        let notifier = Notifier::new(None, config.instance.clone());
+
+        Worker {
+            config: &config,
+            github: &github,
+            git: &CommitlessGit,
+            claude: &FakeClaude::default(),
+            notifier: &notifier,
+            token: "fake-token",
+        }
+        .sweep()
+        .await;
+
+        assert!(github.pulls().is_empty());
+        assert_eq!(
+            github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string(), format!("{LABEL}:planned")],
+            "the trigger label stays on, so the next sweep runs claude again"
+        );
+    }
+
+    #[tokio::test]
     async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
         struct UnpushableGit;
         impl GitOps for UnpushableGit {
             fn sync_default(&self, _: &std::path::Path, _: &str) -> anyhow::Result<String> {
                 Ok("main".to_string())
+            }
+            fn has_new_commits(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<bool> {
+                Ok(true)
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 anyhow::bail!("origin rejected the push")
@@ -1463,6 +1537,14 @@ mod tests {
                     anyhow::bail!("origin unreachable")
                 }
                 Ok("main".to_string())
+            }
+            fn has_new_commits(
+                &self,
+                _: &std::path::Path,
+                _: &str,
+                _: &str,
+            ) -> anyhow::Result<bool> {
+                Ok(true)
             }
             fn push(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
                 Ok(())

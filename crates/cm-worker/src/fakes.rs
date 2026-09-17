@@ -246,8 +246,9 @@ impl GithubClient for FakeGithub {
     }
 }
 
-/// A git that always syncs. `with_default` names origin's default branch,
-/// which is what every PR is opened against.
+/// A git that always syncs, and whose clones always carry the commits a
+/// Claude run was supposed to make. `with_default` names origin's default
+/// branch, which is what every PR is opened against.
 pub struct FakeGit {
     calls: Mutex<Vec<String>>,
     default_branch: String,
@@ -279,6 +280,15 @@ impl GitOps for FakeGit {
             .unwrap()
             .push(format!("sync_default path={}", clone_path.display()));
         Ok(self.default_branch.clone())
+    }
+
+    fn has_new_commits(
+        &self,
+        _clone_path: &Path,
+        _branch: &str,
+        _base: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(true)
     }
 
     fn push(&self, clone_path: &Path, branch: &str, _token: &str) -> anyhow::Result<()> {
