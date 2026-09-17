@@ -1,3 +1,4 @@
+mod backoff;
 mod claim;
 mod claude_cli;
 mod config;
@@ -6,6 +7,7 @@ mod fakes;
 mod notify;
 mod worker;
 
+use backoff::Backoff;
 use claim::ClaimError;
 use cm_github::OctocrabGithubClient;
 use config::Config;
@@ -53,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
         git: &git,
         claude: &claude,
         notifier: &notifier,
+        backoff: &Backoff::default(),
         token: &token,
     }
     .run()

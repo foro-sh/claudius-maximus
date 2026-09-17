@@ -20,6 +20,7 @@ use anyhow::Context;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue};
 
+use crate::backoff::Backoff;
 use crate::claude_cli::Claude;
 use crate::config::{Config, RepoEntry};
 use crate::notify::Notifier;
@@ -37,6 +38,8 @@ pub struct Worker<'a> {
     pub git: &'a dyn GitOps,
     pub claude: &'a dyn Claude,
     pub notifier: &'a Notifier,
+    /// How long each repeatedly-failing issue is being left alone for.
+    pub backoff: &'a Backoff,
     /// The instance's OAuth token, for pushing `claude/issue-N` over HTTPS.
     pub token: &'a str,
 }
@@ -102,6 +105,16 @@ impl Worker<'_> {
                 ));
                 continue;
             }
+            // An issue that failed recently is left alone until its backoff
+            // is up: the retry is a whole Claude run, and one stuck issue
+            // retried every sweep spends the quota the rest of the backlog
+            // needs. Checked before the two API calls `action_for` costs.
+            if self
+                .backoff
+                .resting(&issue_failure_key(&repo.repo, issue.number))
+            {
+                continue;
+            }
             // What to do with it — and whether there is anything to do at all
             // — is decided before the clone is touched: most of a backlog is
             // usually blocked or done, and syncing for those costs two TLS
@@ -149,9 +162,14 @@ impl Worker<'_> {
     /// Everything that fails around one issue is said once per issue, and said
     /// again after the next success there.
     fn report_issue_failure(&self, repo: &RepoEntry, number: u64, err: &anyhow::Error) {
+        let resting_for = self.backoff.record_failure(
+            &issue_failure_key(&repo.repo, number),
+            self.config.poll_interval,
+        );
         self.log(&format!(
-            "{}#{number}: sweep error (continuing): {err:#}",
-            repo.repo
+            "{}#{number}: sweep error (leaving it alone for {}s): {err:#}",
+            repo.repo,
+            resting_for.as_secs()
         ));
         self.notifier.post_once(
             &issue_failure_key(&repo.repo, number),
@@ -250,6 +268,7 @@ or run git — output the plan text only.
         // earlier sweep failure on it is no longer the current state.
         self.notifier.forget(&issue_failure_key(&repo.repo, number));
         self.notifier.forget(&repo_failure_key(&repo.repo));
+        self.backoff.forget(&issue_failure_key(&repo.repo, number));
         self.notifier.post(&format!(
             ":scroll: planned {}#{number} — implementing next sweep — {}",
             repo.repo,
@@ -307,15 +326,22 @@ or run git — output the plan text only.
                 // and for the repo, which is evidently reachable.
                 self.notifier.forget(&issue_failure_key(&repo.repo, number));
                 self.notifier.forget(&repo_failure_key(&repo.repo));
+                self.backoff.forget(&issue_failure_key(&repo.repo, number));
                 self.notifier.post(&format!(
                     ":white_check_mark: shipped {}#{number} — {url}",
                     repo.repo
                 ));
             }
             Err(err) => {
+                let resting_for = self.backoff.record_failure(
+                    &issue_failure_key(&repo.repo, number),
+                    self.config.poll_interval,
+                );
                 self.log(&format!(
-                    "{}#{}: implement failed, will retry next sweep: {err:#}",
-                    repo.repo, number
+                    "{}#{}: implement failed, retrying in {}s: {err:#}",
+                    repo.repo,
+                    number,
+                    resting_for.as_secs()
                 ));
                 self.notifier.post_once(
                     // Keyed on the issue and the stage, not on the error: the
@@ -647,6 +673,7 @@ mod tests {
         claude: FakeClaude,
         config: Config,
         notifier: Notifier,
+        backoff: Backoff,
     }
 
     impl Harness {
@@ -656,6 +683,7 @@ mod tests {
                 git: FakeGit::default(),
                 claude,
                 notifier: Notifier::new(None, config.instance.clone()),
+                backoff: Backoff::default(),
                 config,
             }
         }
@@ -667,6 +695,7 @@ mod tests {
                 git: &self.git,
                 claude: &self.claude,
                 notifier: &self.notifier,
+                backoff: &self.backoff,
                 token: "fake-token",
             }
             .sweep()
@@ -1170,6 +1199,7 @@ mod tests {
             git: &FakeGit::with_default("trunk"),
             claude: &claude,
             notifier: &notifier,
+            backoff: &Backoff::default(),
             token: "fake-token",
         }
         .sweep()
@@ -1239,6 +1269,7 @@ mod tests {
             git: &CommitlessGit,
             claude: &FakeClaude::default(),
             notifier: &notifier,
+            backoff: &Backoff::default(),
             token: "fake-token",
         }
         .sweep()
@@ -1249,6 +1280,36 @@ mod tests {
             github.labels("foro-sh/foro", 7),
             vec![LABEL.to_string(), format!("{LABEL}:planned")],
             "the trigger label stays on, so the next sweep runs claude again"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_issue_that_just_failed_is_not_retried_on_the_very_next_sweep() {
+        // The retry is a whole Claude run. One issue that fails every time
+        // would otherwise spend the quota the rest of the backlog needs,
+        // every sweep, forever.
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::failing_for(&["foro"]),
+        );
+
+        harness.sweep().await;
+        harness.sweep().await;
+
+        assert_eq!(
+            harness.claude.runs().len(),
+            1,
+            "the second sweep is inside the first failure's backoff"
+        );
+        assert_eq!(
+            harness.github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string()],
+            "the trigger label stays on, so the issue comes back when the backoff is up"
         );
     }
 
@@ -1299,6 +1360,7 @@ mod tests {
             git: &UnpushableGit,
             claude: &FakeClaude::default(),
             notifier: &notifier,
+            backoff: &Backoff::default(),
             token: "fake-token",
         }
         .sweep()
@@ -1592,6 +1654,7 @@ mod tests {
             git: &SelectivelyFailingGit,
             claude: &claude,
             notifier: &notifier,
+            backoff: &Backoff::default(),
             token: "fake-token",
         }
         .sweep()

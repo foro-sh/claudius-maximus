@@ -414,7 +414,13 @@ Every repo in `$REPOS` needs all of these:
   also implementing it.
 - **`--dangerously-skip-permissions`** during implement — acceptable on an
   isolated, unprivileged box; tighten with a `settings.json` allowlist otherwise.
-- **Retry on failure is whole-issue.** A failed implement re-runs next sweep;
-  Claude is told to reuse the existing branch/PR rather than duplicate it.
+- **Retry on failure is whole-issue, and backs off.** A failed implement
+  re-runs; Claude is told to reuse the existing branch/PR rather than duplicate
+  it. The wait doubles per consecutive failure on the same issue — one
+  `$POLL_INTERVAL`, then two, up to 64 — because the retry is a whole Claude
+  run and one permanently stuck issue would otherwise spend the quota the rest
+  of the backlog needs. Any success on that issue resets it, and so does
+  restarting the worker: the counters are in memory, GitHub holds the state
+  that matters.
 - **Mattermost messages are controlled text** (no issue titles), so nothing
   richer than a fixed line per transition is posted.
