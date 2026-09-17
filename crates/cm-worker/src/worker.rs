@@ -58,6 +58,11 @@ const WINDOW_KEY: &str = "usage window";
 /// Names the warning that the window is nearly spent.
 const WINDOW_NEARLY_KEY: &str = "usage window nearly spent";
 
+/// Longer than any usage window lasts. A window still shut after this was
+/// never reopened by a run coming back, so nothing is going to clear it except
+/// the clock.
+const WINDOW_CEILING: Duration = Duration::from_secs(6 * 60 * 60);
+
 pub struct Worker<'a> {
     pub config: &'a Config,
     pub github: &'a dyn GithubClient,
@@ -111,6 +116,7 @@ impl Worker<'_> {
     pub async fn sweep(&self) {
         let started = Instant::now();
         let mut tally = Tally::default();
+        self.forget_an_expired_window();
         for repo in &self.config.repos {
             self.status
                 .doing(Activity::on(Stage::Sweeping, repo.repo.clone()));
@@ -139,6 +145,30 @@ impl Worker<'_> {
         let took = started.elapsed();
         self.log(&tally.line(took));
         self.status.swept(tally, took);
+    }
+
+    /// Clears a window that cannot still be shut.
+    ///
+    /// A run coming back is the proof the window reopened, which is the right
+    /// rule and an incomplete one: while every run fails for some other reason
+    /// (expired credentials, a clone that will not sync), no run comes back,
+    /// and the shut state would latch for the life of the process. So at the
+    /// top of every sweep a window whose reset time has passed, or that has
+    /// outlasted any window there is, is written off.
+    fn forget_an_expired_window(&self) {
+        let Some(shut_for) = self.status.window_expired(WINDOW_CEILING) else {
+            return;
+        };
+        self.log(&format!(
+            "usage window written off after {}: the reset it named has passed",
+            human(shut_for)
+        ));
+        self.status.note(
+            Level::Note,
+            format!("usage window written off after {}", human(shut_for)),
+        );
+        self.notifier.forget(WINDOW_KEY);
+        self.notifier.forget(WINDOW_NEARLY_KEY);
     }
 
     async fn sweep_repo(&self, repo: &RepoEntry, tally: &mut Tally) -> anyhow::Result<()> {
@@ -579,6 +609,13 @@ worker's job, and the box has no credentials for you to do it with.
             observer: &watch,
         });
         let took = started.elapsed();
+        // Back to the sweep the moment the run returns. Leaving the stage on
+        // `planning` through the GitHub calls that follow would make every
+        // watcher believe a run is still in flight: `/healthz` would excuse a
+        // hung octocrab call forever, and the heartbeat would eventually
+        // announce that a run which has already finished has gone quiet.
+        self.status
+            .doing(Activity::on(Stage::Sweeping, repo.to_owned()));
 
         self.status.ran_claude(took, result.is_ok());
         // An answer is proof the window is open, whatever was or was not
@@ -781,6 +818,11 @@ impl RunWatch<'_> {
     /// Nearly spent. Worth one line: it means the run in flight may be the
     /// last one for a few hours.
     fn approaching(&self) {
+        // Said once per window: the CLI repeats this warning as freely as it
+        // repeats the limit itself, and the chronicle is only 64 entries deep.
+        if !self.status.window_nearly() {
+            return;
+        }
         self.status.note(
             Level::Bad,
             format!("usage window nearly spent on {}", self.subject),
@@ -1095,6 +1137,67 @@ mod tests {
             harness.github.labels("foro-sh/foro", 7),
             vec![LABEL.to_string(), format!("{LABEL}:planned")],
             "waiting out a window is not failing: the issue was planned"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_window_nothing_ever_reopens_is_written_off_at_the_next_sweep() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            // Every run dies, and the first one says the window is spent on
+            // its way out: nothing will ever come back to prove it reopened.
+            FakeClaude::failing_for(&["foro"]).saying(&[&format!(
+                "Claude AI usage limit reached|{}",
+                crate::status::now_epoch() - 1
+            )]),
+        );
+
+        harness.sweep().await;
+        assert!(harness.snapshot().window.is_shut());
+
+        harness.sweep().await;
+        assert!(
+            !harness.snapshot().window.is_shut(),
+            "the reset it named is in the past, so the shut state cannot be true"
+        );
+        assert!(
+            harness
+                .events()
+                .iter()
+                .any(|e| e.starts_with("usage window written off")),
+            "{:?}",
+            harness.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_run_is_no_longer_a_run_in_flight() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        let snapshot = harness.snapshot();
+        assert!(
+            !snapshot.activity.stage.runs_claude(),
+            "the sweep is back to sweeping, not still planning: {:?}",
+            snapshot.activity
+        );
+        assert_eq!(
+            snapshot.quiet_for, None,
+            "a run that has finished cannot have gone quiet"
         );
     }
 

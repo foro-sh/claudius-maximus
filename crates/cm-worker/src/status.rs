@@ -307,6 +307,11 @@ struct Inner {
     last_line_at: Option<Instant>,
     last_sweep: Option<(Tally, Duration, u64, Instant)>,
     events: VecDeque<Event>,
+    /// Whether "nearly spent" has been said since the window last changed.
+    /// The CLI repeats that warning as freely as it repeats the limit itself,
+    /// and the chronicle is 64 entries deep: unchecked, one talkative run
+    /// evicts every real event in it.
+    said_nearly: bool,
 }
 
 /// The live half of [`Window`]: `Instant` rather than a duration, since a
@@ -338,6 +343,7 @@ impl Status {
                 last_line_at: None,
                 last_sweep: None,
                 events: VecDeque::new(),
+                said_nearly: false,
             }),
         }
     }
@@ -400,8 +406,40 @@ impl Status {
             resets_at: spent.resets_at,
             said: spent.said.clone(),
         };
+        inner.said_nearly = false;
         inner.counters.windows_shut += 1;
         true
+    }
+
+    /// The window is nearly spent. True the first time since the window last
+    /// changed, and false for every repeat of the same warning.
+    pub fn window_nearly(&self) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        !std::mem::replace(&mut inner.said_nearly, true)
+    }
+
+    /// Reopens a window that cannot still be shut: the reset time `claude`
+    /// gave has come and gone, or it has been shut longer than any window
+    /// lasts.
+    ///
+    /// Without this the shut state latches. Nothing but a run coming back
+    /// clears it, and a run cannot come back while every run fails for some
+    /// other reason (expired credentials, say), so the page would say "waiting
+    /// out a spent usage window" for the life of the process. Returns how long
+    /// it was shut, when it reopened one.
+    pub fn window_expired(&self, ceiling: Duration) -> Option<Duration> {
+        let expired = {
+            let inner = self.inner.lock().unwrap();
+            match inner.window {
+                Shutter::Open => false,
+                Shutter::Shut {
+                    since, resets_at, ..
+                } => {
+                    since.elapsed() > ceiling || resets_at.is_some_and(|epoch| epoch < now_epoch())
+                }
+            }
+        };
+        expired.then(|| self.window_open()).flatten()
     }
 
     /// The window is open again. Returns how long it was shut, or `None` if it
@@ -415,6 +453,7 @@ impl Status {
         let shut_for = since.elapsed();
         inner.counters.window_time += shut_for;
         inner.window = Shutter::Open;
+        inner.said_nearly = false;
         Some(shut_for)
     }
 
@@ -624,6 +663,63 @@ mod tests {
             }
             other => panic!("expected a shut window, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nearly_spent_is_said_once_per_window() {
+        let status = Status::new(&Config::sample());
+
+        assert!(status.window_nearly());
+        assert!(!status.window_nearly(), "the CLI repeats that warning too");
+
+        status.window_shut(&Spent::default());
+        assert!(
+            status.window_nearly(),
+            "a new window is a new warning worth hearing"
+        );
+
+        status.window_open();
+        assert!(status.window_nearly());
+    }
+
+    #[test]
+    fn a_window_whose_reset_time_has_passed_does_not_stay_shut() {
+        let status = Status::new(&Config::sample());
+        status.window_shut(&Spent {
+            resets_at: Some(now_epoch() - 1),
+            said: None,
+        });
+
+        assert!(status.snapshot().window.is_shut());
+        assert!(
+            status
+                .window_expired(Duration::from_secs(6 * 3600))
+                .is_some(),
+            "the reset time it gave us has come and gone"
+        );
+        assert_eq!(status.snapshot().window, Window::Open);
+        assert!(
+            status
+                .window_expired(Duration::from_secs(6 * 3600))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_window_shut_longer_than_any_window_lasts_does_not_stay_shut() {
+        let status = Status::new(&Config::sample());
+        status.window_shut(&Spent::default());
+
+        assert!(
+            status
+                .window_expired(Duration::from_secs(6 * 3600))
+                .is_none(),
+            "a window that was just shut is simply shut"
+        );
+        assert!(
+            status.window_expired(Duration::ZERO).is_some(),
+            "one that has outlasted every possible window is not"
+        );
     }
 
     #[test]
