@@ -13,6 +13,7 @@ mod systemd;
 mod worker;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use backoff::Backoff;
 use claim::ClaimError;
@@ -80,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     let beat_every = match (config.heartbeat_interval, systemd.watchdog_interval()) {
         (interval, _) if !interval.is_zero() => Some(interval),
         (_, Some(watchdog)) => Some(watchdog / 2),
-        _ if systemd.supervised() => Some(std::time::Duration::from_secs(60)),
+        _ if systemd.supervised() => Some(Duration::from_secs(60)),
         _ => None,
     };
     // Up before the device flow rather than after it, so that the page can

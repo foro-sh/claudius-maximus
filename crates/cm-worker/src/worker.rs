@@ -741,9 +741,11 @@ worker's job, and the box has no credentials for you to do it with.
 /// Holds the two things that are safe to touch from there (the register and
 /// the notifier) and not the `Worker`, whose GitHub client belongs to the
 /// async side of the house. The Mattermost POST it can make is worth up to ten
-/// seconds of a held-up pipe, once per usage window: `claude` is waiting hours
-/// at that point, so the cost is nothing and the alternative is a channel to
-/// nowhere.
+/// seconds of a held-up pipe: `claude` is waiting hours at that point, so the
+/// cost is nothing and the alternative is a channel to nowhere. A webhook that
+/// is answering costs that once per usage window, since `post_once` remembers
+/// a line it delivered; one that is down is retried on each notice the CLI
+/// repeats, which is the point of offering it again.
 struct RunWatch<'a> {
     status: &'a Status,
     notifier: &'a Notifier,
