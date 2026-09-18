@@ -303,8 +303,11 @@ $ curl -s localhost:9781/status.json | jq '{line, window, counters}'
 The metric worth putting on a graph first is
 `claudius_usage_window_seconds_total`: the time this subscription spent waiting
 for a reset is the throughput ceiling of the whole project, measured instead of
-guessed. `claudius_claude_seconds_total` next to it is the time it spent
-working, and the ratio is how much a second instance would buy you.
+guessed. `claudius_claude_seconds_total` next to it is the wall time inside
+`claude` - the wait included, since a run waiting out a window is still a run -
+so the time actually spent working is the difference between the two, and the
+ratio of the window to that difference is how much a second instance would buy
+you.
 
 ```yaml
 # prometheus.yml
@@ -342,8 +345,12 @@ issue body somebody else may have written.
 
 ### The usage window
 
-The worker reads three things out of a run's output: that the window is spent,
-that it has reopened, and that it is nearly spent. A spent window turns into a
+The worker reads three things out of a run's **stderr**: that the window is
+spent, that it has reopened, and that it is nearly spent. Stderr only, and not
+as a detail: a plan goes to stdout, and a plan for an issue about usage windows
+says "usage limit reached" in as many words, so this repo would park itself on
+an imaginary reset the first time it planned its own backlog. Stdout still
+counts as the run being alive. A spent window turns into a
 journal line, a status change, one Mattermost message
 (`:hourglass_flowing_sand:`) and a countdown on the page; reopening turns into
 the matching `:crown:` line. Each is said once per window, however many times

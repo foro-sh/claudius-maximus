@@ -382,7 +382,9 @@ fn metrics(snapshot: &Snapshot) -> String {
     );
     metric(
         "claudius_claude_seconds_total",
-        "Wall time spent inside claude.",
+        "Wall time spent inside claude, the wait on a spent usage window \
+         included: subtract claudius_usage_window_seconds_total for the time \
+         it spent working.",
         "counter",
         counters.claude_time.as_secs().to_string(),
     );
