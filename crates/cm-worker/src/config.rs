@@ -1,6 +1,7 @@
 //! `$REPOS` and the rest of the worker's env-var config. Rust port of the
 //! bash worker's `repos.sh` + config block, same format, same defaults, so
 //! migrating an instance's `/etc/<user>.env` needs no edits.
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -27,6 +28,17 @@ pub struct Config {
     pub implement_model: String,
     pub implement_effort: String,
     pub poll_interval: Duration,
+    /// How often the heartbeat looks at what the worker is doing. Zero turns
+    /// the thread off entirely, for anyone who wants the old silence back.
+    pub heartbeat_interval: Duration,
+    /// How long a `claude` run may write nothing before the worker says so.
+    /// Zero turns that off. It is only ever said, never acted on: a run that
+    /// has been thinking for an hour is still an hour of work worth having.
+    pub stall_after: Duration,
+    /// Where to serve the status page, or `None` for no page at all. Every
+    /// instance on a box needs its own port, which is why `add-instance.sh`
+    /// hands each one a different one rather than defaulting.
+    pub status_addr: Option<SocketAddr>,
     pub claim_dir: PathBuf,
     pub mattermost_webhook_url: Option<String>,
 }
@@ -52,11 +64,10 @@ impl Config {
             plan_effort: env_or("PLAN_EFFORT", "high"),
             implement_model: env_or("IMPLEMENT_MODEL", "claude-sonnet-5"),
             implement_effort: env_or("IMPLEMENT_EFFORT", "high"),
-            poll_interval: Duration::from_secs(
-                env_or("POLL_INTERVAL", "60").parse().map_err(|_| {
-                    anyhow::anyhow!("POLL_INTERVAL must be a whole number of seconds")
-                })?,
-            ),
+            poll_interval: env_secs("POLL_INTERVAL", 60)?,
+            heartbeat_interval: env_secs("HEARTBEAT_INTERVAL", 60)?,
+            stall_after: env_secs("STALL_AFTER", 1800)?,
+            status_addr: parse_status_addr(&env_or("STATUS_ADDR", "off"))?,
             claim_dir: PathBuf::from(env_or("CLAUDIUS_CLAIM_DIR", "/tmp")),
             mattermost_webhook_url: std::env::var("CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL").ok(),
         })
@@ -65,6 +76,46 @@ impl Config {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// A whole number of seconds out of the environment. A typo here is fatal
+/// rather than defaulted: `HEARTBEAT_INTERVAL=1m` silently meaning 60 seconds
+/// on one box and 0 on another is exactly the kind of thing nobody notices
+/// until they are reading a journal that has been quiet for a week.
+fn env_secs(key: &str, default: u64) -> anyhow::Result<Duration> {
+    let Ok(raw) = std::env::var(key) else {
+        return Ok(Duration::from_secs(default));
+    };
+    let secs: u64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{key} must be a whole number of seconds, got '{raw}'"))?;
+    Ok(Duration::from_secs(secs))
+}
+
+/// `STATUS_ADDR`: `off` (the default), a bare port, or anything that resolves
+/// to an address.
+///
+/// A bare port means loopback, deliberately: the page carries issue numbers,
+/// repo names and whatever `claude` last printed, none of which belongs on a
+/// public interface without something in front of it. Binding elsewhere stays
+/// possible, it just has to be asked for in full.
+fn parse_status_addr(raw: &str) -> anyhow::Result<Option<SocketAddr>> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("off") || raw == "0" {
+        return Ok(None);
+    }
+    if let Ok(port) = raw.parse::<u16>() {
+        return Ok(Some(SocketAddr::from(([127, 0, 0, 1], port))));
+    }
+    let addr = raw
+        .to_socket_addrs()
+        .map_err(|err| {
+            anyhow::anyhow!("STATUS_ADDR must be 'off', a port, or host:port (got '{raw}'): {err}")
+        })?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("STATUS_ADDR '{raw}' resolves to nothing"))?;
+    Ok(Some(addr))
 }
 
 /// Parses the same format as `repos.sh`'s `parse_repos`: comma-separated
@@ -108,6 +159,34 @@ fn parse_repos(raw: &str) -> anyhow::Result<Vec<RepoEntry>> {
         anyhow::bail!("REPOS is empty (want owner/name=/abs/path/to/clone[,...])");
     }
     Ok(repos)
+}
+
+#[cfg(test)]
+impl Config {
+    /// A config to build test cases on, so that a new knob is one edit here
+    /// rather than one in every module that needs a `Config` to test with.
+    pub fn sample() -> Config {
+        Config {
+            repos: vec![RepoEntry {
+                repo: "foro-sh/foro".to_string(),
+                clone_path: PathBuf::from("/clones/foro"),
+                authors: vec![],
+            }],
+            github_client_id: "Iv1.testclientid".to_string(),
+            label: "claudius-maximus".to_string(),
+            instance: "Claudius Maximus".to_string(),
+            plan_model: "claude-opus-5".to_string(),
+            plan_effort: "high".to_string(),
+            implement_model: "claude-sonnet-5".to_string(),
+            implement_effort: "high".to_string(),
+            poll_interval: Duration::from_secs(60),
+            heartbeat_interval: Duration::from_secs(60),
+            stall_after: Duration::from_secs(1800),
+            status_addr: None,
+            claim_dir: PathBuf::from("/tmp"),
+            mattermost_webhook_url: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +235,30 @@ mod tests {
     #[test]
     fn rejects_an_empty_repos_var() {
         assert!(parse_repos("").is_err());
+    }
+
+    #[test]
+    fn a_bare_status_port_means_loopback() {
+        assert_eq!(
+            parse_status_addr("9787").unwrap(),
+            Some(SocketAddr::from(([127, 0, 0, 1], 9787)))
+        );
+        assert_eq!(
+            parse_status_addr("127.0.0.1:9787").unwrap(),
+            Some(SocketAddr::from(([127, 0, 0, 1], 9787)))
+        );
+    }
+
+    #[test]
+    fn the_status_page_can_be_turned_off_and_is_off_by_default() {
+        assert_eq!(parse_status_addr("off").unwrap(), None);
+        assert_eq!(parse_status_addr("OFF").unwrap(), None);
+        assert_eq!(parse_status_addr("").unwrap(), None);
+    }
+
+    #[test]
+    fn a_status_addr_that_is_not_an_address_is_fatal() {
+        let err = parse_status_addr("127.0.0.1").unwrap_err().to_string();
+        assert!(err.contains("host:port"), "{err}");
     }
 }

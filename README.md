@@ -9,7 +9,10 @@ PRs using a Claude Code **subscription** (OAuth, not `ANTHROPIC_API_KEY`),
 plan-then-implement, to max out the rolling 5h usage window. No webhook, no
 Tailscale Funnel, no queue daemon: a poll loop over the GitHub API with GitHub
 labels as the only state. The worker only makes outbound calls, so it needs no
-inbound tunnel. Status updates post to Mattermost if configured.
+inbound tunnel. Status updates post to Mattermost if configured, and it says
+what it is doing while it does it: a heartbeat in the journal, a live line
+under `systemctl status`, and a status page with `/metrics` and `/healthz`
+beside it (see [Watching it work](#watching-it-work)).
 
 One **instance** = one subscription = one unix user, run from the
 `claudius@.service` template. Beyond one subscription's rolling window,
@@ -36,8 +39,12 @@ describes the binary that issue specifies.
 | `claudius-maximus:done`                         | ignored                                                                                                   |
 
 Quota exhaustion is handled by Claude (`CLAUDE_CODE_RETRY_WATCHDOG=1`): it waits
-for the window to reset and resumes. A reboot loses nothing: all state is in
-labels.
+for the window to reset and resumes the run it was in the middle of, so a spent
+window costs the backlog time and nothing else. The worker does not manage that
+wait, it only reports it: it reads the limit notice out of the run's output and
+says, in the journal, in Mattermost and on the status page, that it is waiting
+and for how long. See [the usage window](#the-usage-window). A reboot loses
+nothing: all state is in labels.
 
 ### Multiple repos
 
@@ -157,6 +164,9 @@ PLAN_EFFORT=high                 # optional; low|medium|high|xhigh|max
 IMPLEMENT_MODEL=claude-sonnet-5  # optional; worker's implement step
 IMPLEMENT_EFFORT=high            # optional; low|medium|high|xhigh|max
 POLL_INTERVAL=60                 # optional, seconds
+STATUS_ADDR=127.0.0.1:9781       # optional; status page + /metrics + /healthz, 'off' to disable
+HEARTBEAT_INTERVAL=60            # optional, seconds; 0 = no periodic heartbeat line in the journal
+STALL_AFTER=1800                 # optional, seconds; how long a silent run runs before it is mentioned
 CLAUDIUS_CLAIM_DIR=/tmp          # optional; where the $LABEL lock lives, see below
 CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=http://localhost:8065/hooks/xxxx   # optional
 # Commit attribution: must be a verified email on this instance's GitHub account.
@@ -211,6 +221,154 @@ to (or over) `worker.sh`, complete the device-flow login once in the foreground,
 point `ExecStart` at the binary, `systemctl daemon-reload && systemctl restart`.
 The env file, labels, clones and in-flight issue state all carry over unchanged
 `worker.sh`, `repos.sh` and the `gh` CLI can then go.
+
+## Watching it work
+
+A plan run is minutes, an implement run can be an hour, and a run that meets a
+spent usage window is hours. The sweep loop is blocked for all of that, so an
+instance doing exactly what it should looks, from outside, like one that has
+hung. Four surfaces answer "what is it doing right now", in increasing order of
+how much you have to have set up:
+
+### The journal
+
+```
+$ journalctl -u claudius@claudius-maximus -f
+Claudius Maximus: rising: repos=foro-sh/foro label=claudius-maximus …
+Claudius Maximus: systemd is listening; status lines go to `systemctl status`, watchdog every 180s
+Claudius Maximus: status page on http://127.0.0.1:9781/
+Claudius Maximus: foro-sh/foro#12: implementing
+Claudius Maximus: implementing foro-sh/foro#12 (claude-sonnet-5) for 5m00s, quiet for 12s
+Claudius Maximus: foro-sh/foro#12 claude: Claude AI usage limit reached|1763481600
+Claudius Maximus: foro-sh/foro#12: usage window spent (reopens in 1h12m), the run waits for the reset rather than failing
+Claudius Maximus: waiting out a spent usage window for 20m00s, reopens in 52m00s (was implementing foro-sh/foro#12 (claude-sonnet-5))
+Claudius Maximus: foro-sh/foro#12: usage window reopened after 1h12m, carrying on
+Claudius Maximus: foro-sh/foro#12: implementing run finished after 1h31m
+Claudius Maximus: sweep done in 1h31m: 3 issue(s) seen, 0 planned, 1 shipped, 1 skipped, 1 resting, 0 failed
+```
+
+Three of those lines are new in kind rather than in wording. The **heartbeat**
+repeats while a run is in flight or a window is being waited out, and stays
+quiet between sweeps (`HEARTBEAT_INTERVAL`, seconds; `0` turns that line off).
+`claude`'s **stderr** is forwarded as it arrives, which is where a run says it
+is in trouble. And every sweep ends with **what the sweep did**, so a drained
+backlog and a stopped loop stop looking alike.
+
+A run that writes nothing for `STALL_AFTER` (default 30 minutes) is mentioned,
+once, in the journal and in Mattermost. It is never killed: the worker cannot
+tell a run that is thinking hard from one that is gone, and an hour of thinking
+is still an hour of work worth having.
+
+### `systemctl status`
+
+The unit is `Type=notify`, so the current line is attached to the service:
+
+```
+$ systemctl status claudius@claudius-maximus
+● claudius@claudius-maximus.service - Claudius (claudius-maximus): …
+     Active: active (running) since Mon 2026-09-14 09:12:41 UTC; 2 days ago
+     Status: "implementing foro-sh/foro#12 (claude-sonnet-5) for 12m30s, quiet for 41s"
+```
+
+`WatchdogSec=180` goes with it. The heartbeat thread answers it independently of
+the sweep loop, which is the point: a long run and a spent window are allowed to
+block for hours and must never be restarted for it. What the watchdog catches is
+the process that is still there with nobody home. `HEARTBEAT_INTERVAL=0`
+silences the per-minute line without silencing the pings; the one-off line
+about a run that has gone quiet is not the pulse and carries on, until
+`STALL_AFTER=0` turns that off too.
+
+### The status page
+
+`STATUS_ADDR` (a bare port means loopback; `off` disables it) serves four GETs:
+
+| Route          | What it is                                                                 |
+| -------------- | -------------------------------------------------------------------------- |
+| `/`            | The page: current stage, a spent window with a countdown, counters, the last line `claude` wrote, and the chronicle of what has happened |
+| `/status.json` | The same thing for scripts                                                  |
+| `/metrics`     | Prometheus                                                                  |
+| `/healthz`     | `200` while the worker is still moving, `503` when it has stopped           |
+
+```bash
+$ curl -s localhost:9781/status.json | jq '{line, window, counters}'
+{
+  "line": "waiting out a spent usage window for 20m00s, reopens in 52m00s (was implementing foro-sh/foro#12 (claude-sonnet-5))",
+  "window": { "shut": true, "shut_for_seconds": 1200, "resets_at_epoch": 1763481600, "claude_said": null },
+  "counters": { "sweeps": 41, "issues_seen": 96, "plans_posted": 9, "pulls_opened": 8,
+                "claude_runs": 17, "claude_failures": 1, "issue_failures": 1, "repo_failures": 0,
+                "windows_shut": 2, "claude_seconds": 38211, "window_seconds": 9160 }
+}
+```
+
+The metric worth putting on a graph first is
+`claudius_usage_window_seconds_total`: the time this subscription spent waiting
+for a reset is the throughput ceiling of the whole project, measured instead of
+guessed. `claudius_claude_seconds_total` next to it is the wall time inside
+`claude` - the wait included, since a run waiting out a window is still a run -
+so the time actually spent working is the difference between the two, and the
+ratio of the window to that difference is how much a second instance would buy
+you.
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: claudius
+    static_configs:
+      - targets: ["127.0.0.1:9781", "127.0.0.1:9782"]   # maximus, secundus
+```
+
+`/healthz` is deliberately not a progress check. A nine-hour implement run is
+healthy, and so is the five-hour window it may be waiting out inside; what
+returns `503` is a worker with no run in flight that has not moved on to
+anything in ten poll intervals (never less than ten minutes), which is the one
+failure neither the watchdog nor `ps` can see.
+
+It asks what the worker moved to last rather than when a sweep last *finished*,
+because a sweep over a full backlog is hours of short activities between long
+runs - a PR pushed, labels moved, the next clone synced - and the sweep that
+would prove the loop is turning is the one still running. The grace therefore
+assumes every step between runs is shorter than it. The one-off first clone of
+a very large repo is the one that may not be: raise `POLL_INTERVAL` on such a
+box, or expect a `503` while that clone lands.
+
+A spent window is not an excuse of its own and needs none: `claude` is what
+waits one out, so a shut window comes with a run in flight. One left standing
+on its own is a run that died without saying the window reopened, and excusing
+it would hide a stopped worker for as long as the CLI said the window would
+last.
+
+`add-instance.sh` derives the port from the instance's ordinal, so
+claudius-maximus gets 9781, claudius-secundus 9782, and so on to
+claudius-centesimus on 9880. It refuses to provision an instance whose port
+another env file already claims, and the worker refuses to start if the port is
+in use, rather than running unwatchable.
+
+Keep it on loopback unless you put something in front of it. Nothing secret is
+on the page (no tokens, no prompts), but issue numbers, repo names and whatever
+`claude` last printed are, and the last of those came out of a run over an
+issue body somebody else may have written.
+
+### The usage window
+
+The worker reads three things out of a run's **stderr**: that the window is
+spent, that it has reopened, and that it is nearly spent. Stderr only, and not
+as a detail: a plan goes to stdout, and a plan for an issue about usage windows
+says "usage limit reached" in as many words, so this repo would park itself on
+an imaginary reset the first time it planned its own backlog. Stdout still
+counts as the run being alive. A spent window turns into a
+journal line, a status change, one Mattermost message
+(`:hourglass_flowing_sand:`) and a countdown on the page; reopening turns into
+the matching `:crown:` line. Each is said once per window, however many times
+the CLI repeats itself while it waits.
+
+This is best-effort by design, and it is the only place in the worker that is.
+The CLI's wording is not an API, so a release that rephrases the notice makes
+the worker quieter, never wrong: `claude`'s own retry watchdog is what waits the
+window out and resumes, and nothing here interferes with it. A run that comes
+back with an answer is treated as proof the window is open again, whatever was
+or was not recognised on the way; a run that *failed* is not, since giving up on
+a spent window is the likeliest way for one to fail and announcing a recovery on
+every retry would be worse than saying nothing.
 
 ## Adding an instance
 
@@ -359,7 +517,11 @@ The convention is faking the external boundary rather than mocking internals: th
 GitHub and git surfaces are traits (`cm_github::GithubClient`, `cm_git::GitOps`)
 the state machine is driven through with fakes, and so is the `claude` CLI
 (`cm_worker::claude_cli::Claude`), so the suite exercises the real state machine without touching GitHub or
-spending subscription quota. CI runs `cargo fmt --check`, `cargo clippy
+spending subscription quota. A fake run can also say what a real one says while
+it waits out a spent usage window, so the reporting in
+[Watching it work](#watching-it-work) is tested without a five-hour wait; what
+that reporting renders (the page, the JSON, the metrics, `/healthz`) are pure
+functions over a snapshot of the register, tested without a socket. CI runs `cargo fmt --check`, `cargo clippy
 --workspace --all-targets -- -D warnings`, `cargo build --workspace` and
 `cargo test --workspace` on every PR.
 
@@ -430,3 +592,16 @@ Every repo in `$REPOS` needs all of these:
   that matters.
 - **Mattermost messages are controlled text** (no issue titles), so nothing
   richer than a fixed line per transition is posted.
+- **Usage-window detection is a best guess, and only ever a report.** It reads
+  the `claude` CLI's own wording, which is not an API. A rephrased notice makes
+  the worker quieter, never wrong: the CLI waits the window out and resumes
+  either way, and a run that comes back is proof enough that the window
+  reopened. See [the usage window](#the-usage-window).
+- **The systemd watchdog proves liveness, not progress.** The heartbeat thread
+  answers it independently of the sweep loop, because a long run and a spent
+  window legitimately block for hours. A worker that has stopped moving is what
+  `/healthz` is for.
+- **The status page is a window onto a running process, not a history.** The
+  register lives in memory, like the backoff counters and for the same reason:
+  GitHub holds the state that matters, so a restart starts the counters over.
+  Scrape `/metrics` if you want the history kept.
