@@ -785,18 +785,23 @@ impl RunWatch<'_> {
     /// The window is spent and the run is waiting it out. Said once per
     /// window: the CLI repeats itself while it waits.
     fn spent(&self, spent: &limits::Spent) {
-        if !self.status.window_shut(spent) {
-            return;
-        }
+        let first = self.status.window_shut(spent);
         let when = reset_phrase(spent);
-        self.log(&format!(
-            "{}: usage window spent{when}, the run waits for the reset rather than failing",
-            self.subject
-        ));
-        self.status.note(
-            Level::Bad,
-            format!("usage window spent on {}{when}", self.subject),
-        );
+        if first {
+            self.log(&format!(
+                "{}: usage window spent{when}, the run waits for the reset rather than failing",
+                self.subject
+            ));
+            self.status.note(
+                Level::Bad,
+                format!("usage window spent on {}{when}", self.subject),
+            );
+        }
+        // Offered on every repeat, not only the first. `post_once` remembers a
+        // key once Mattermost has actually taken it, precisely so a webhook
+        // that was down for one POST does not silence the line for good -
+        // and returning early on the repeats is what took that away. The CLI
+        // saying so again is the retry.
         self.notifier.post_once(
             WINDOW_KEY,
             &format!(
@@ -830,15 +835,17 @@ impl RunWatch<'_> {
     /// Nearly spent. Worth one line: it means the run in flight may be the
     /// last one for a few hours.
     fn approaching(&self) {
-        // Said once per window: the CLI repeats this warning as freely as it
-        // repeats the limit itself, and the chronicle is only 64 entries deep.
-        if !self.status.window_nearly() {
-            return;
+        // The chronicle is 64 entries deep and the CLI repeats this warning as
+        // freely as it repeats the limit itself, so it goes in once per
+        // window. The Mattermost line is offered on every repeat, for the same
+        // reason as in `spent`: `post_once` is what makes it once, and it only
+        // remembers a line Mattermost took.
+        if self.status.window_nearly() {
+            self.status.note(
+                Level::Bad,
+                format!("usage window nearly spent on {}", self.subject),
+            );
         }
-        self.status.note(
-            Level::Bad,
-            format!("usage window nearly spent on {}", self.subject),
-        );
         self.notifier.post_once(
             WINDOW_NEARLY_KEY,
             &format!(
@@ -1167,11 +1174,13 @@ mod tests {
         );
         assert!(snapshot.counters.window_time > Duration::ZERO);
         let events = harness.events();
-        assert!(
+        assert_eq!(
             events
                 .iter()
-                .any(|e| e.starts_with("usage window spent on foro-sh/foro#7")),
-            "{events:?}"
+                .filter(|e| e.starts_with("usage window spent on foro-sh/foro#7"))
+                .count(),
+            1,
+            "the chronicle is 64 deep: one entry per window, not per repeat. {events:?}"
         );
         assert!(
             events
