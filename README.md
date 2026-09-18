@@ -285,7 +285,7 @@ silences the journal lines without silencing the pings.
 | `/`            | The page: current stage, a spent window with a countdown, counters, the last line `claude` wrote, and the chronicle of what has happened |
 | `/status.json` | The same thing for scripts                                                  |
 | `/metrics`     | Prometheus                                                                  |
-| `/healthz`     | `200` while the sweep loop is coming round, `503` when it has stopped       |
+| `/healthz`     | `200` while the worker is still moving, `503` when it has stopped           |
 
 ```bash
 $ curl -s localhost:9781/status.json | jq '{line, window, counters}'
@@ -313,10 +313,19 @@ scrape_configs:
 ```
 
 `/healthz` is deliberately not a progress check. A nine-hour implement run is
-healthy and a five-hour window is healthy; what returns `503` is a sweep loop
-that has not come round in ten poll intervals (never less than ten minutes)
-with nothing running, which is the one failure neither the watchdog nor `ps`
-can see.
+healthy, and so is the five-hour window it may be waiting out inside; what
+returns `503` is a worker with no run in flight that has not moved on to
+anything in ten poll intervals (never less than ten minutes), which is the one
+failure neither the watchdog nor `ps` can see.
+
+It asks what the worker moved to last rather than when a sweep last *finished*,
+because a sweep over a full backlog is hours of short activities between long
+runs - a PR pushed, labels moved, the next clone synced - and the sweep that
+would prove the loop is turning is the one still running. A spent window is not
+an excuse of its own and needs none: `claude` is what waits one out, so a shut
+window comes with a run in flight. One left standing on its own is a run that
+died without saying the window reopened, and excusing it would hide a stopped
+worker for as long as the CLI said the window would last.
 
 `add-instance.sh` derives the port from the instance's ordinal, so
 claudius-maximus gets 9781, claudius-secundus 9782, and so on to
@@ -576,8 +585,8 @@ Every repo in `$REPOS` needs all of these:
   reopened. See [the usage window](#the-usage-window).
 - **The systemd watchdog proves liveness, not progress.** The heartbeat thread
   answers it independently of the sweep loop, because a long run and a spent
-  window legitimately block for hours. A sweep loop that has stopped coming
-  round is what `/healthz` is for.
+  window legitimately block for hours. A worker that has stopped moving is what
+  `/healthz` is for.
 - **The status page is a window onto a running process, not a history.** The
   register lives in memory, like the backoff counters and for the same reason:
   GitHub holds the state that matters, so a restart starts the counters over.

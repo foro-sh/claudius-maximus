@@ -179,7 +179,7 @@ pub fn respond(target: &str, snapshot: &Snapshot) -> Response {
                     "Service Unavailable",
                     "text/plain; charset=utf-8",
                     format!(
-                        "no sweep has finished in {}, and nothing is running: {}\n",
+                        "nothing has moved in {}, and no run is in flight: {}\n",
                         human(grace),
                         snapshot.line()
                     ),
@@ -195,28 +195,34 @@ pub fn respond(target: &str, snapshot: &Snapshot) -> Response {
     }
 }
 
-/// Is the loop still turning?
+/// Is the worker still moving?
 ///
 /// Deliberately not "is it making progress": a `claude` run may legitimately
-/// take hours and a spent window may legitimately take five, and both of those
-/// are healthy. What this catches is the case nothing else does, including the
-/// systemd watchdog, which sees a process that is alive and pinging: a sweep
-/// loop that has stopped coming round.
+/// take hours, and the spent usage window it may be waiting out inside takes
+/// five. What this catches is the case nothing else does, including the
+/// systemd watchdog, which sees a process that is alive and pinging: a worker
+/// that has stopped coming round.
+///
+/// So: a run in flight, or an activity that changed within the grace. A sweep
+/// is a long stretch of short activities - a run ends, the PR is pushed, the
+/// next issue's clone is synced - and asking instead when the last sweep
+/// *finished* judged all of that against a sweep that cannot have finished,
+/// because it is the one still running. Any sweep longer than the grace
+/// reported 503 in every gap between its runs.
+///
+/// A spent window is no longer an excuse of its own, and needs none: the run
+/// is what waits it out, so a shut window always comes with a run in flight.
+/// Standing alone it means the last run died without saying the window
+/// reopened, and a worker sweeping on regardless is answered for by its
+/// activity, while one that has stopped should be caught rather than excused
+/// for as long as `claude` said the window would last.
 pub fn healthy(snapshot: &Snapshot, grace: Duration) -> bool {
-    if snapshot.activity.stage.runs_claude() || snapshot.window.is_shut() {
-        return true;
-    }
-    match &snapshot.last_sweep {
-        Some(sweep) => sweep.ended_ago <= grace,
-        // Nothing has come round yet: fine at first, since the device flow
-        // waits on a human, and not fine an hour in.
-        None => snapshot.uptime <= grace,
-    }
+    snapshot.activity.stage.runs_claude() || snapshot.activity_for <= grace
 }
 
-/// How long `/healthz` waits for a sweep before calling the loop stopped: ten
-/// intervals, and never less than ten minutes, so that a short `POLL_INTERVAL`
-/// does not turn every slow GitHub call into an outage.
+/// How long `/healthz` waits for the worker to move before calling it stopped:
+/// ten poll intervals, and never less than ten minutes, so that a short
+/// `POLL_INTERVAL` does not turn every slow GitHub call into an outage.
 pub fn grace_for(poll_interval: Duration) -> Duration {
     (poll_interval * 10).max(Duration::from_secs(600))
 }
@@ -900,6 +906,7 @@ mod tests {
         let grace = grace_for(snapshot.poll_interval);
 
         snapshot.activity = Activity::run(Stage::Implementing, "foro-sh/foro#7", "sonnet");
+        snapshot.activity_for = Duration::from_secs(9 * 3600);
         snapshot.uptime = Duration::from_secs(9 * 3600);
         assert!(
             healthy(&snapshot, grace),
@@ -907,36 +914,68 @@ mod tests {
         );
 
         snapshot.activity = Activity::bare(Stage::Resting);
+        snapshot.activity_for = Duration::from_secs(30);
+        assert!(
+            healthy(&snapshot, grace),
+            "resting between sweeps, having moved 30 seconds ago"
+        );
+
+        snapshot.activity_for = grace + Duration::from_secs(1);
+        assert!(
+            !healthy(&snapshot, grace),
+            "nine hours up, no run in flight, nothing has moved: the loop stopped"
+        );
+        assert_eq!(respond("/healthz", &snapshot).code, 503);
+        assert!(body("/healthz", &snapshot).contains("nothing has moved"));
+    }
+
+    #[test]
+    fn a_long_sweep_is_healthy_between_its_runs() {
+        // The gap between one issue's run and the next: the PR is pushed, the
+        // labels are moved, the next clone is synced. No claude in flight, and
+        // the sweep that would prove the loop is turning is the one still
+        // running, hours in. Judging that against the *last finished* sweep
+        // answered 503 in every such gap, on the workload this exists to watch.
+        let mut snapshot = snapshot();
+        let grace = grace_for(snapshot.poll_interval);
+
+        snapshot.activity = Activity::on(Stage::Shipping, "foro-sh/foro#7");
+        snapshot.activity_for = Duration::from_secs(4);
+        snapshot.uptime = Duration::from_secs(3 * 3600);
+        snapshot.last_sweep = Some(LastSweep {
+            tally: Tally::default(),
+            took: Duration::from_secs(60),
+            ended_epoch: snapshot.now_epoch - 3 * 3600,
+            ended_ago: Duration::from_secs(3 * 3600),
+        });
+
+        assert!(healthy(&snapshot, grace));
+        assert_eq!(respond("/healthz", &snapshot).code, 200);
+    }
+
+    #[test]
+    fn a_window_nobody_is_waiting_out_does_not_excuse_a_stopped_loop() {
+        // A run that died for some other reason leaves the shut window behind
+        // it: `claude` is what waits a window out, so a shut one with no run
+        // in flight is a leftover, not a worker doing its job. Excusing it
+        // would have hidden a stopped loop for as long as claude said the
+        // window would last.
+        let mut snapshot = snapshot();
+        let grace = grace_for(snapshot.poll_interval);
+        snapshot.activity = Activity::bare(Stage::Resting);
+        snapshot.activity_for = grace + Duration::from_secs(1);
         snapshot.window = Window::Shut {
             for_: Duration::from_secs(4 * 3600),
             resets_at: None,
             said: None,
         };
-        assert!(healthy(&snapshot, grace), "so is waiting out the window");
 
-        snapshot.window = Window::Open;
-        assert!(
-            !healthy(&snapshot, grace),
-            "nine hours up, nothing running, no sweep ever finished: the loop stopped"
-        );
+        assert!(!healthy(&snapshot, grace));
         assert_eq!(respond("/healthz", &snapshot).code, 503);
 
-        snapshot.last_sweep = Some(LastSweep {
-            tally: Tally::default(),
-            took: Duration::from_secs(2),
-            ended_epoch: snapshot.now_epoch,
-            ended_ago: Duration::from_secs(30),
-        });
+        // Inside the run that is actually waiting it out, it is healthy.
+        snapshot.activity = Activity::run(Stage::Implementing, "foro-sh/foro#7", "sonnet");
         assert!(healthy(&snapshot, grace));
-        assert_eq!(respond("/healthz", &snapshot).code, 200);
-
-        snapshot.last_sweep = Some(LastSweep {
-            tally: Tally::default(),
-            took: Duration::from_secs(2),
-            ended_epoch: snapshot.now_epoch,
-            ended_ago: grace + Duration::from_secs(1),
-        });
-        assert_eq!(respond("/healthz", &snapshot).code, 503);
     }
 
     #[test]
