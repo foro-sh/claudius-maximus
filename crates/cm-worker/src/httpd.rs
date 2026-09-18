@@ -201,7 +201,7 @@ pub fn respond(target: &str, snapshot: &Snapshot) -> Response {
 /// take hours, and the spent usage window it may be waiting out inside takes
 /// five. What this catches is the case nothing else does, including the
 /// systemd watchdog, which sees a process that is alive and pinging: a worker
-/// that has stopped coming round.
+/// that has stopped.
 ///
 /// So: a run in flight, or an activity that changed within the grace. A sweep
 /// is a long stretch of short activities - a run ends, the PR is pushed, the
@@ -321,7 +321,8 @@ fn metrics(snapshot: &Snapshot) -> String {
     );
     metric(
         "claudius_healthy",
-        "1 while the sweep loop is still coming round.",
+        "1 while the worker is still moving: a run in flight, or an activity \
+         newer than ten poll intervals.",
         "gauge",
         bit(healthy(snapshot, grace_for(snapshot.poll_interval))),
     );
@@ -842,6 +843,21 @@ mod tests {
             !metrics.contains("claudius_last_sweep_seconds"),
             "no sweep has finished, so there is no gauge to report"
         );
+    }
+
+    #[test]
+    fn every_metrics_line_is_a_comment_or_a_sample() {
+        // A HELP string is written across source lines for the sake of the
+        // margin, and a newline that survived into one would end the comment
+        // and leave the rest of the sentence parsed as a metric.
+        for line in body("/metrics", &working()).lines() {
+            assert!(
+                line.starts_with("# HELP ")
+                    || line.starts_with("# TYPE ")
+                    || line.starts_with("claudius_"),
+                "stray line in /metrics: {line:?}"
+            );
+        }
     }
 
     #[test]
