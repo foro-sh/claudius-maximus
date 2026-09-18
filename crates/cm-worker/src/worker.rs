@@ -178,6 +178,16 @@ impl Worker<'_> {
             .await?;
         tally.seen += issues.len() as u64;
         for issue in issues {
+            // Per issue rather than per repo. Weighing one costs two GitHub
+            // calls and may cost a clone sync, so a backlog of a few hundred
+            // keeps the worker in here for minutes at a time: a register that
+            // only moved once per repo left `/healthz` unable to tell that
+            // from a worker that had stopped, and left the page saying
+            // "sweeping foro-sh/foro" without saying what it was weighing.
+            self.status.doing(Activity::on(
+                Stage::Sweeping,
+                format!("{}#{}", repo.repo, issue.number),
+            ));
             // The author rides along with the list, so gating costs no extra
             // API call.
             if !author_allowed(&issue.author, &repo.authors) {
@@ -609,13 +619,15 @@ worker's job, and the box has no credentials for you to do it with.
             observer: &watch,
         });
         let took = started.elapsed();
-        // Back to the sweep the moment the run returns. Leaving the stage on
-        // `planning` through the GitHub calls that follow would make every
-        // watcher believe a run is still in flight: `/healthz` would excuse a
-        // hung octocrab call forever, and the heartbeat would eventually
-        // announce that a run which has already finished has gone quiet.
+        // Back to the sweep the moment the run returns, and still on this
+        // issue: what follows is its plan comment or its pull request.
+        // Leaving the stage on `planning` through the GitHub calls that follow
+        // would make every watcher believe a run is still in flight:
+        // `/healthz` would excuse a hung octocrab call forever, and the
+        // heartbeat would eventually announce that a run which has already
+        // finished has gone quiet.
         self.status
-            .doing(Activity::on(Stage::Sweeping, repo.to_owned()));
+            .doing(Activity::on(Stage::Sweeping, subject.clone()));
 
         self.status.ran_claude(took, result.is_ok());
         // An answer is proof the window is open, whatever was or was not
@@ -1050,6 +1062,40 @@ mod tests {
             .sweep()
             .await;
         }
+    }
+
+    #[tokio::test]
+    async fn the_register_names_every_issue_the_sweep_weighs() {
+        // Nothing here is actionable, so no claude runs and no stage changes:
+        // exactly the sweep that used to sit on one unchanging "sweeping
+        // foro-sh/foro" for as long as GitHub took to answer for all of them.
+        let done = format!("{LABEL}:done");
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL, &done]),
+                FakeIssue::new("foro-sh/foro", 9, "danielsteman", &[LABEL, &done]),
+            ],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        let snapshot = harness.snapshot();
+        assert_eq!(snapshot.activity.stage, Stage::Sweeping);
+        assert_eq!(
+            snapshot.activity.subject.as_deref(),
+            Some("foro-sh/foro#9"),
+            "the register moved on with the sweep, issue by issue"
+        );
+        assert_eq!(
+            snapshot.last_sweep.expect("a sweep finished").tally.skipped,
+            2
+        );
     }
 
     #[tokio::test]
