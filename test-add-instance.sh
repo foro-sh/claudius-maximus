@@ -99,6 +99,27 @@ claims=$(
     fail=1
 }
 
+# The closing instructions must not offer a page that is turned off: with
+# STATUS_ADDR=off the address is the word 'off', and `curl http://off/` sends
+# an operator somewhere that does not exist.
+offered() {
+    {
+        echo "user=claudius-maximus"
+        echo "status_addr=$1"
+        sed -n '/^status_port_of()/,/^}/p' add-instance.sh
+        sed -n '/^# The closing instructions offer the page only/,/^fi$/p' add-instance.sh
+        echo 'printf "%s\n" "$page_lines"'
+    } | bash
+}
+[[ $(offered 127.0.0.1:9781) == *"curl http://127.0.0.1:9781/healthz"* ]] || {
+    echo "FAIL: a served instance is not told where its page is"
+    fail=1
+}
+[[ $(offered off) != *curl* ]] || {
+    echo "FAIL: an instance with STATUS_ADDR=off is offered a page it does not serve"
+    fail=1
+}
+
 display=$(bash -c '
 display_name_from_instance() {
     local out= part

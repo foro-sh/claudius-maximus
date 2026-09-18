@@ -151,6 +151,15 @@ fi
 label=$user
 instance=$(display_name_from_instance "$user")
 status_addr=${STATUS_ADDR:-127.0.0.1:$(status_port_for_name "$user")}
+# The closing instructions offer the page only when there is one: with
+# STATUS_ADDR=off the address is the word 'off', and `curl http://off/` is
+# worse than saying nothing.
+if [[ -n $(status_port_of "$status_addr") ]]; then
+    page_lines="    curl http://$status_addr/           # the page, with the chronicle
+    curl http://$status_addr/healthz    # 503 only if it has stopped moving"
+else
+    page_lines="    journalctl -u claudius@$user -f     # no status page: STATUS_ADDR is off"
+fi
 
 [[ -n ${REPOS:-} ]] || die "set REPOS=owner/name[,owner/name2[=author|author]|…], see README"
 # One OAuth App is shared by every instance: the device flow is what makes
@@ -226,13 +235,13 @@ unset IFS
 # Same for the status port: two workers on one port means the second refuses
 # to start, and finding that out from a failed unit is worse than finding it
 # out here.
+our_port=$(status_port_of "$status_addr")
 for env_file in /etc/claudius-*.env; do
     [[ -e $env_file ]] || continue
     [[ $env_file == "/etc/$user.env" ]] && continue
     if grep -qxF "LABEL=$label" "$env_file"; then
         die "label '$label' is already owned by $env_file, every instance needs its own queue"
     fi
-    our_port=$(status_port_of "$status_addr")
     their_port=$(status_port_of "$(sed -n 's/^STATUS_ADDR=//p' "$env_file" | head -1)")
     if [[ -n $our_port && $our_port == "$their_port" ]]; then
         die "status port $our_port is already taken by $env_file, every instance needs its own port"
@@ -324,9 +333,8 @@ Then:
     systemctl enable --now claudius@$user
     journalctl -u claudius@$user -f
 
-Once it is up, $instance says what it is doing in three places:
+Once it is up, $instance says what it is doing:
 
     systemctl status claudius@$user     # one line: the current stage
-    curl http://$status_addr/           # the page, with the chronicle
-    curl http://$status_addr/healthz    # 503 only if the sweep loop stopped
+$page_lines
 EOF
