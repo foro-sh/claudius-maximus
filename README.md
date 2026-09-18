@@ -326,11 +326,16 @@ failure neither the watchdog nor `ps` can see.
 It asks what the worker moved to last rather than when a sweep last *finished*,
 because a sweep over a full backlog is hours of short activities between long
 runs - a PR pushed, labels moved, the next clone synced - and the sweep that
-would prove the loop is turning is the one still running. A spent window is not
-an excuse of its own and needs none: `claude` is what waits one out, so a shut
-window comes with a run in flight. One left standing on its own is a run that
-died without saying the window reopened, and excusing it would hide a stopped
-worker for as long as the CLI said the window would last.
+would prove the loop is turning is the one still running. The grace therefore
+assumes every step between runs is shorter than it. The one-off first clone of
+a very large repo is the one that may not be: raise `POLL_INTERVAL` on such a
+box, or expect a `503` while that clone lands.
+
+A spent window is not an excuse of its own and needs none: `claude` is what
+waits one out, so a shut window comes with a run in flight. One left standing
+on its own is a run that died without saying the window reopened, and excusing
+it would hide a stopped worker for as long as the CLI said the window would
+last.
 
 `add-instance.sh` derives the port from the instance's ordinal, so
 claudius-maximus gets 9781, claudius-secundus 9782, and so on to
