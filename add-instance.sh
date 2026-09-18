@@ -275,9 +275,10 @@ POLL_INTERVAL=${POLL_INTERVAL:-60}
 # them off; a bare port means loopback. Nothing here belongs on a public
 # interface without something in front of it.
 STATUS_ADDR=$status_addr
-# Seconds between heartbeat lines while a run is in flight (0 = none, systemd
-# still gets its status line and its watchdog ping), and how long a run may
-# write nothing before that is said out loud (0 = never say it).
+# Seconds between heartbeat lines while a run is in flight (0 = no periodic
+# line; systemd still gets its status line and its watchdog ping, and a run
+# that goes quiet is still reported), and how long a run may write nothing
+# before that is said out loud (0 = never say it).
 HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-60}
 STALL_AFTER=${STALL_AFTER:-1800}
 ${CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL:+CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=$CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL}

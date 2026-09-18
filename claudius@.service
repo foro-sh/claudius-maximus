@@ -43,8 +43,9 @@ ExecStart=/home/%i/claudius-maximus/claudius-maximus
 # can prove: a claude run legitimately blocks for hours, and a spent usage
 # window legitimately blocks for five, so neither of those may be a restart.
 # What it catches is the worker that is still there with nobody home. Set
-# HEARTBEAT_INTERVAL=0 in the env file to silence the journal lines; the pings
-# carry on regardless.
+# HEARTBEAT_INTERVAL=0 in the env file to silence the per-minute journal line;
+# the pings, and the one-off line about a run that has gone quiet, carry on
+# regardless (STALL_AFTER=0 silences that one).
 WatchdogSec=180
 Restart=always
 RestartSec=30

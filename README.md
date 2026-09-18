@@ -165,7 +165,7 @@ IMPLEMENT_MODEL=claude-sonnet-5  # optional; worker's implement step
 IMPLEMENT_EFFORT=high            # optional; low|medium|high|xhigh|max
 POLL_INTERVAL=60                 # optional, seconds
 STATUS_ADDR=127.0.0.1:9781       # optional; status page + /metrics + /healthz, 'off' to disable
-HEARTBEAT_INTERVAL=60            # optional, seconds; 0 = no heartbeat lines in the journal
+HEARTBEAT_INTERVAL=60            # optional, seconds; 0 = no periodic heartbeat line in the journal
 STALL_AFTER=1800                 # optional, seconds; how long a silent run runs before it is mentioned
 CLAUDIUS_CLAIM_DIR=/tmp          # optional; where the $LABEL lock lives, see below
 CLAUDIUS_MAXIMUS_MATTERMOST_WEBHOOK_URL=http://localhost:8065/hooks/xxxx   # optional
@@ -249,7 +249,7 @@ Claudius Maximus: sweep done in 1h31m: 3 issue(s) seen, 0 planned, 1 shipped, 1 
 
 Three of those lines are new in kind rather than in wording. The **heartbeat**
 repeats while a run is in flight or a window is being waited out, and stays
-quiet between sweeps (`HEARTBEAT_INTERVAL`, seconds; `0` turns the lines off).
+quiet between sweeps (`HEARTBEAT_INTERVAL`, seconds; `0` turns that line off).
 `claude`'s **stderr** is forwarded as it arrives, which is where a run says it
 is in trouble. And every sweep ends with **what the sweep did**, so a drained
 backlog and a stopped loop stop looking alike.
@@ -274,7 +274,9 @@ $ systemctl status claudius@claudius-maximus
 the sweep loop, which is the point: a long run and a spent window are allowed to
 block for hours and must never be restarted for it. What the watchdog catches is
 the process that is still there with nobody home. `HEARTBEAT_INTERVAL=0`
-silences the journal lines without silencing the pings.
+silences the per-minute line without silencing the pings; the one-off line
+about a run that has gone quiet is not the pulse and carries on, until
+`STALL_AFTER=0` turns that off too.
 
 ### The status page
 

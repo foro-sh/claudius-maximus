@@ -31,10 +31,14 @@ pub struct Heartbeat {
     /// How long a `claude` run may say nothing before that is worth a message.
     /// Zero turns that off.
     pub stall_after: Duration,
-    /// No journal lines, only systemd. What `HEARTBEAT_INTERVAL=0` means under
-    /// a unit with a watchdog: somebody asked for the old silence, and the
-    /// watchdog still has to be answered or systemd kills a healthy worker
-    /// every few minutes.
+    /// No pulse in the journal, only systemd. What `HEARTBEAT_INTERVAL=0`
+    /// means under a unit with a watchdog: somebody asked for the old silence,
+    /// and the watchdog still has to be answered or systemd kills a healthy
+    /// worker every few minutes.
+    ///
+    /// It silences the periodic line and nothing else. A run that has gone
+    /// quiet is an event rather than a pulse, and it is said once; `STALL_AFTER`
+    /// is the knob for that one.
     pub quiet: bool,
 }
 
@@ -91,6 +95,10 @@ impl Heartbeat {
             beat.last_logged = None;
         }
 
+        // Outside the `quiet` guard on purpose: this is not the pulse. It is
+        // said once per run that goes quiet, and somebody who turned the
+        // per-minute line off has not asked to stop hearing about a run that
+        // has written nothing for half an hour. `STALL_AFTER=0` is that ask.
         self.check_for_silence(snapshot, beat);
     }
 
@@ -264,6 +272,17 @@ mod tests {
         assert_eq!(
             beat.last_logged, None,
             "the journal stays quiet, systemd and the watchdog do not"
+        );
+
+        // The pulse is what was silenced. A run that has written nothing for
+        // half an hour is an event, said once, and STALL_AFTER is the knob for
+        // anyone who does not want to hear it either.
+        heartbeat.stall_after = Duration::from_nanos(1);
+        heartbeat.tick(&status.snapshot(), &mut beat);
+        assert_eq!(
+            beat.stalled.as_deref(),
+            Some("foro-sh/foro#7"),
+            "a quiet heartbeat still says when a run has gone quiet"
         );
     }
 
