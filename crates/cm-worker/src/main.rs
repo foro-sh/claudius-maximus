@@ -72,12 +72,15 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     // `HEARTBEAT_INTERVAL=0` asks for no journal lines, which is not the same
-    // as asking for no thread: under a unit with a watchdog, something has to
+    // as asking for no thread. Under a unit with a watchdog something has to
     // answer it or systemd restarts a perfectly healthy worker every few
-    // minutes.
+    // minutes; and under any notify unit, the `STATUS=` line under `systemctl
+    // status` is systemd's surface rather than the journal's, so silencing the
+    // journal must not leave it blank for the life of the process.
     let beat_every = match (config.heartbeat_interval, systemd.watchdog_interval()) {
         (interval, _) if !interval.is_zero() => Some(interval),
         (_, Some(watchdog)) => Some(watchdog / 2),
+        _ if systemd.supervised() => Some(std::time::Duration::from_secs(60)),
         _ => None,
     };
     // Up before the device flow rather than after it, so that the page can
