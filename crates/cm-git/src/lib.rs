@@ -42,7 +42,8 @@ pub trait GitOps: Send + Sync {
     fn has_new_commits(&self, clone_path: &Path, branch: &str, base: &str) -> anyhow::Result<bool>;
 
     /// Push `branch` to `origin` over HTTPS, authenticated with `token`
-    /// (the same OAuth token `cm-github`'s client holds).
+    /// (the same OAuth token `cm-github`'s client holds). A ref origin
+    /// refuses is an error, not a push that quietly did nothing.
     fn push(&self, clone_path: &Path, branch: &str, token: &str) -> anyhow::Result<()>;
 }
 
@@ -126,13 +127,30 @@ impl GitOps for Git2Ops {
         let repo = Repository::open(clone_path)?;
         let mut remote = repo.find_remote("origin")?;
 
+        // libgit2 only fails `push` itself for a transport or local error. A
+        // ref the remote refused (a pre-receive hook, push protection, a ref
+        // it cannot write) comes back per ref through this callback, and
+        // `push` still returns `Ok`: without it a refused push reads as a
+        // pushed one, and the PR opens on whatever the remote had before.
+        let mut refused: Vec<String> = Vec::new();
+        let mut callbacks = credentials(token);
+        callbacks.push_update_reference(|refname, status| {
+            if let Some(message) = status {
+                refused.push(format!("{refname}: {message}"));
+            }
+            Ok(())
+        });
         let mut options = PushOptions::new();
-        options.remote_callbacks(credentials(token));
+        options.remote_callbacks(callbacks);
 
         remote.push(
             &[format!("refs/heads/{branch}:refs/heads/{branch}")],
             Some(&mut options),
         )?;
+        drop(options);
+        if !refused.is_empty() {
+            anyhow::bail!("origin refused the push: {}", refused.join("; "));
+        }
         Ok(())
     }
 }
@@ -352,6 +370,60 @@ mod tests {
             Git2Ops
                 .has_new_commits(&clone, "claude/issue-1", &base)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn push_fails_when_the_remote_refuses_the_ref() {
+        // libgit2 reports a ref the remote refused (a pre-receive hook, a
+        // push rule, a ref it cannot write) per ref, not as an error from
+        // `push` itself. A `claude` branch on the remote makes
+        // `claude/issue-1` unwritable there, which is the local transport's
+        // way of saying no.
+        let (tmp, clone) = fixture("main");
+        let bare = Repository::open_bare(tmp.path().join("remote.git")).unwrap();
+        let head = bare.head().unwrap().peel_to_commit().unwrap();
+        bare.branch("claude", &head, false).unwrap();
+
+        Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap();
+        branch_off_head(&clone, "claude/issue-1");
+        fs::write(clone.join("fix.txt"), "the change\n").unwrap();
+        commit_all(&Repository::open(&clone).unwrap(), "fix: the thing");
+
+        let err = Git2Ops
+            .push(&clone, "claude/issue-1", TOKEN)
+            .expect_err("a refused ref must fail the push");
+        assert!(
+            format!("{err:#}").contains("refs/heads/claude/issue-1"),
+            "{err:#}"
+        );
+        assert!(bare.find_reference("refs/heads/claude/issue-1").is_err());
+    }
+
+    #[test]
+    fn push_sends_the_branch_to_the_remote() {
+        let (tmp, clone) = fixture("main");
+        Git2Ops.sync_default(&clone, NO_REMOTE, TOKEN).unwrap();
+        branch_off_head(&clone, "claude/issue-1");
+        fs::write(clone.join("fix.txt"), "the change\n").unwrap();
+        commit_all(&Repository::open(&clone).unwrap(), "fix: the thing");
+
+        Git2Ops.push(&clone, "claude/issue-1", TOKEN).unwrap();
+
+        let bare = Repository::open_bare(tmp.path().join("remote.git")).unwrap();
+        assert_eq!(
+            bare.find_reference("refs/heads/claude/issue-1")
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id(),
+            Repository::open(&clone)
+                .unwrap()
+                .head()
+                .unwrap()
+                .peel_to_commit()
+                .unwrap()
+                .id()
         );
     }
 
