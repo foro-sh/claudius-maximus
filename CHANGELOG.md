@@ -1,3 +1,9 @@
+## [0.7.1](https://github.com/foro-sh/claudius-maximus/compare/v0.7.0...v0.7.1) (2026-09-26)
+
+### Bug Fixes
+
+* **git:** fail the push when origin refuses the ref ([093d7f2](https://github.com/foro-sh/claudius-maximus/commit/093d7f220adcb2630ede99d30a102cb14fd5e76a))
+
 ## [0.7.0](https://github.com/foro-sh/claudius-maximus/compare/v0.6.0...v0.7.0) (2026-09-22)
 
 ### Features
