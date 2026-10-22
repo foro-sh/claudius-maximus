@@ -29,7 +29,7 @@ describes the binary that issue specifies.
 | Author outside the repo's allowlist             | Skipped before planning                                                                                                                        |
 | Blocked by an open issue (GitHub relationship)  | Skipped until every blocker closes                                                                                                             |
 | Labeled `$LABEL`, not yet `:planned`            | Claude posts an implementation plan, adds `$LABEL:planned`                                                                                      |
-| `:planned`                                      | Claude implements and commits on `claude/issue-N`; the worker pushes it and opens the PR (`Closes #N`), adds `:done`, removes the trigger label |
+| `:planned`                                      | Claude implements and commits on `claude/issue-N`, then reviews its own diff and commits fixes `REVIEW_ROUNDS` times (default 3); the worker pushes it and opens the PR (`Closes #N`), adds `:done`, removes the trigger label |
 | `:done`                                         | Ignored                                                                                                                                        |
 
 A reboot loses nothing — all state is in labels.
@@ -167,6 +167,7 @@ PLAN_MODEL=claude-opus-5         # optional; worker's plan step
 PLAN_EFFORT=high                 # optional; low|medium|high|xhigh|max
 IMPLEMENT_MODEL=claude-sonnet-5  # optional; worker's implement step
 IMPLEMENT_EFFORT=high            # optional; low|medium|high|xhigh|max
+REVIEW_ROUNDS=3                  # optional; review-and-fix runs before the push, 0 = none
 POLL_INTERVAL=60                 # optional, seconds
 STATUS_ADDR=127.0.0.1:9781       # optional; status page + /metrics + /healthz, 'off' to disable
 HEARTBEAT_INTERVAL=60            # optional, seconds; 0 = no periodic heartbeat line
