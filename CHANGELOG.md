@@ -1,3 +1,9 @@
+## [0.8.0](https://github.com/foro-sh/claudius-maximus/compare/v0.7.1...v0.8.0) (2026-10-22)
+
+### Features
+
+* **worker:** review and fix the branch before opening the PR ([10fbc39](https://github.com/foro-sh/claudius-maximus/commit/10fbc39996e81968508ea2d97fdc84f96da069af))
+
 ## [0.7.1](https://github.com/foro-sh/claudius-maximus/compare/v0.7.0...v0.7.1) (2026-09-26)
 
 ### Bug Fixes
