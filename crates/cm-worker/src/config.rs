@@ -27,6 +27,9 @@ pub struct Config {
     pub plan_effort: String,
     pub implement_model: String,
     pub implement_effort: String,
+    /// How many review-and-fix runs follow the implementing run before the
+    /// branch is pushed. Zero ships the implementation unreviewed.
+    pub review_rounds: u32,
     pub poll_interval: Duration,
     /// How often the heartbeat looks at what the worker is doing. Zero turns
     /// the thread off entirely, for anyone who wants the old silence back.
@@ -64,6 +67,10 @@ impl Config {
             plan_effort: env_or("PLAN_EFFORT", "high"),
             implement_model: env_or("IMPLEMENT_MODEL", "claude-sonnet-5"),
             implement_effort: env_or("IMPLEMENT_EFFORT", "high"),
+            review_rounds: env_or("REVIEW_ROUNDS", "3")
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("REVIEW_ROUNDS must be a whole number"))?,
             poll_interval: env_secs("POLL_INTERVAL", 60)?,
             heartbeat_interval: env_secs("HEARTBEAT_INTERVAL", 60)?,
             stall_after: env_secs("STALL_AFTER", 1800)?,
@@ -179,6 +186,7 @@ impl Config {
             plan_effort: "high".to_string(),
             implement_model: "claude-sonnet-5".to_string(),
             implement_effort: "high".to_string(),
+            review_rounds: 0,
             poll_interval: Duration::from_secs(60),
             heartbeat_interval: Duration::from_secs(60),
             stall_after: Duration::from_secs(1800),

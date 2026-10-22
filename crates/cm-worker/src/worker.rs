@@ -552,6 +552,21 @@ worker's job, and the box has no credentials for you to do it with.
                  retrying next sweep"
             );
         }
+        for round in 1..=self.config.review_rounds {
+            self.log(&format!(
+                "{}#{number}: review round {round}/{}",
+                repo.repo, self.config.review_rounds
+            ));
+            self.run_claude(
+                Stage::Reviewing,
+                &repo.repo,
+                number,
+                &repo.clone_path,
+                &self.config.implement_model,
+                &self.config.implement_effort,
+                &review_prompt(&repo.repo, issue, &branch, base, round),
+            )?;
+        }
         self.ship(repo, issue, &branch, base).await
     }
 
@@ -967,6 +982,26 @@ fn fenced(text: &str) -> String {
 
 /// One branch per issue, so two instances never collide: an issue belongs to
 /// exactly one queue.
+/// One review-and-fix pass over what the implementing run committed. The
+/// rounds run before the push, so the PR opens with the fixes already on it
+/// and a round that fails leaves nothing half-reviewed on GitHub.
+fn review_prompt(repo: &str, issue: &Issue, branch: &str, base: &str, round: u32) -> String {
+    format!(
+        "Review round {round} of the change on branch {branch} for GitHub issue
+#{} in {repo}, following this repo's CLAUDE.md. Check out {branch} and review
+`git diff {base}...{branch}` against the issue quoted below as a strict code
+reviewer: correctness bugs first, then missing tests, then anything CLAUDE.md
+forbids. Fix every real problem you find, run the test/lint commands from
+CLAUDE.md, and commit each fix as its own Conventional Commit on {branch}. If
+nothing needs fixing, commit nothing. Do NOT push, do NOT open a pull request,
+do NOT merge anything.
+
+{}",
+        issue.number,
+        quote_issue(issue)
+    )
+}
+
 fn branch_for(number: u64) -> String {
     format!("claude/issue-{number}")
 }
@@ -1329,6 +1364,43 @@ mod tests {
         let last = snapshot.last_sweep.expect("two sweeps finished");
         assert_eq!(last.tally.resting, 1);
         assert_eq!(last.tally.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn every_review_round_runs_before_the_pull_request_opens() {
+        let mut config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        config.review_rounds = 3;
+        let harness = Harness::new(
+            config,
+            vec![
+                FakeIssue::new(
+                    "foro-sh/foro",
+                    7,
+                    "danielsteman",
+                    &[LABEL, &format!("{LABEL}:planned")],
+                )
+                .with_comment(&plan_comment("Claudius Maximus", LABEL)),
+            ],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        let prompts = harness.claude.prompts();
+        assert_eq!(prompts.len(), 4, "one implement run, then three reviews");
+        for (i, prompt) in prompts[1..].iter().enumerate() {
+            assert!(
+                prompt.contains(&format!("Review round {}", i + 1)),
+                "{prompt}"
+            );
+            assert!(prompt.contains("branch claude/issue-7"), "{prompt}");
+            assert!(prompt.contains("Do NOT push"), "{prompt}");
+        }
+        assert_eq!(harness.github.pulls().len(), 1);
     }
 
     #[tokio::test]

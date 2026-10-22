@@ -42,6 +42,8 @@ pub enum Stage {
     Planning,
     /// A `claude` run, writing the code.
     Implementing,
+    /// A `claude` run, reviewing the implementation and committing fixes.
+    Reviewing,
     /// Pushing a branch and opening its PR.
     Shipping,
     /// Between sweeps.
@@ -53,7 +55,10 @@ impl Stage {
     /// the ones allowed to take hours: everything that watches for a stuck
     /// worker has to know the difference.
     pub fn runs_claude(self) -> bool {
-        matches!(self, Stage::Planning | Stage::Implementing)
+        matches!(
+            self,
+            Stage::Planning | Stage::Implementing | Stage::Reviewing
+        )
     }
 
     /// The word used in logs, in `STATUS=`, on the page and as a metric label.
@@ -64,6 +69,7 @@ impl Stage {
             Stage::Sweeping => "sweeping",
             Stage::Planning => "planning",
             Stage::Implementing => "implementing",
+            Stage::Reviewing => "reviewing",
             Stage::Shipping => "shipping",
             Stage::Resting => "resting",
         }
@@ -72,12 +78,13 @@ impl Stage {
 
 /// Every stage there is, for the renderers that want one series per stage
 /// rather than one value naming the current one.
-pub const STAGES: [Stage; 7] = [
+pub const STAGES: [Stage; 8] = [
     Stage::Rising,
     Stage::Authorizing,
     Stage::Sweeping,
     Stage::Planning,
     Stage::Implementing,
+    Stage::Reviewing,
     Stage::Shipping,
     Stage::Resting,
 ];
