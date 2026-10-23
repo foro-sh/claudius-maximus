@@ -31,6 +31,7 @@ describes the binary that issue specifies.
 | Labeled `$LABEL`, not yet `:planned`            | Claude posts an implementation plan, adds `$LABEL:planned`                                                                                      |
 | `:planned`                                      | Claude implements and commits on `claude/issue-N`, then reviews its own diff and commits fixes `REVIEW_ROUNDS` times (default 3); the worker pushes it and opens the PR (`Closes #N`), adds `:done`, removes the trigger label |
 | `:done`                                         | Ignored                                                                                                                                        |
+| PR labeled `$LABEL:review`, opened by this instance | Claude reviews the PR's branch and commits fixes `REVIEW_ROUNDS` more times; the worker pushes them onto the PR and removes the label |
 
 A reboot loses nothing — all state is in labels.
 
