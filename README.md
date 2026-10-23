@@ -31,6 +31,7 @@ describes the binary that issue specifies.
 | Labeled `$LABEL`, not yet `:planned`            | Claude posts an implementation plan, adds `$LABEL:planned`                                                                                      |
 | `:planned`                                      | Claude implements and commits on `claude/issue-N`, then reviews its own diff and commits fixes `REVIEW_ROUNDS` times (default 3); the worker pushes it and opens the PR (`Closes #N`), adds `:done`, removes the trigger label |
 | `:done`                                         | Ignored                                                                                                                                        |
+| PR labeled `$LABEL:review`, opened by this instance | Claude reviews the PR's branch and commits fixes `REVIEW_ROUNDS` more times; the worker pushes them onto the PR and removes the label |
 
 A reboot loses nothing — all state is in labels.
 
@@ -96,7 +97,8 @@ and one tree corrupts the other.
 Three things it can't do for you:
 
 1. **The label triad** — `$LABEL`, `$LABEL:planned`, `$LABEL:done` — must exist
-   in every repo the instance serves. The worker moves those labels, it never
+   in every repo the instance serves, plus `$LABEL:review` if you want to tag
+   PRs for more review rounds. The worker moves those labels, it never
    creates them. Make them in GitHub's UI or with `gh` from your workstation.
 
 2. **The subscription login**, as the person who holds it:
