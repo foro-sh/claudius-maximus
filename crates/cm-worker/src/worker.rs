@@ -616,10 +616,15 @@ worker's job, and the box has no credentials for you to do it with.
                 tally.resting += 1;
                 continue;
             }
-            match self.review_pull(repo, &pull).await {
+            // The label comes off inside the same result: failing to remove
+            // it is this PR's failure, not the repo's.
+            let reviewed = match self.review_pull(repo, &pull).await {
+                Ok(()) => self.github.remove_label(&repo.repo, number, &label).await,
+                Err(err) => Err(err),
+            };
+            match reviewed {
                 Ok(()) => {
                     tally.reviewed += 1;
-                    self.github.remove_label(&repo.repo, number, &label).await?;
                     self.notifier.forget(&issue_failure_key(&repo.repo, number));
                     self.backoff.forget(&issue_failure_key(&repo.repo, number));
                     let url = format!("https://github.com/{}/pull/{number}", repo.repo);
