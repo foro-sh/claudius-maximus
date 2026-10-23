@@ -96,7 +96,8 @@ and one tree corrupts the other.
 Three things it can't do for you:
 
 1. **The label triad** — `$LABEL`, `$LABEL:planned`, `$LABEL:done` — must exist
-   in every repo the instance serves. The worker moves those labels, it never
+   in every repo the instance serves, plus `$LABEL:review` if you want to tag
+   PRs for more review rounds. The worker moves those labels, it never
    creates them. Make them in GitHub's UI or with `gh` from your workstation.
 
 2. **The subscription login**, as the person who holds it:

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use cm_git::GitOps;
-use cm_github::{GithubClient, Issue, IssueComment};
+use cm_github::{GithubClient, Issue, IssueComment, PullRequest};
 
 use crate::claude_cli::{Claude, ClaudeRun, Stream};
 
@@ -23,6 +23,9 @@ pub struct FakeIssue {
     pub labels: Vec<String>,
     pub comments: Vec<IssueComment>,
     pub blocked: bool,
+    /// `Some(head)` makes this a pull request from `head` onto `main`: on
+    /// GitHub a PR is an issue too, with the same labels.
+    pub head: Option<String>,
 }
 
 impl FakeIssue {
@@ -36,6 +39,15 @@ impl FakeIssue {
             labels: labels.iter().map(|l| l.to_string()).collect(),
             comments: Vec::new(),
             blocked: false,
+            head: None,
+        }
+    }
+
+    /// An open pull request from `head`.
+    pub fn pull(repo: &str, number: u64, author: &str, head: &str, labels: &[&str]) -> Self {
+        FakeIssue {
+            head: Some(head.to_string()),
+            ..FakeIssue::new(repo, number, author, labels)
         }
     }
 
@@ -128,6 +140,7 @@ impl GithubClient for FakeGithub {
         let mut issues: Vec<Issue> = state
             .issues
             .iter()
+            .filter(|i| i.head.is_none())
             .filter(|i| i.repo == repo && i.labels.iter().any(|l| l == label))
             .map(|i| Issue {
                 number: i.number,
@@ -138,6 +151,32 @@ impl GithubClient for FakeGithub {
             .collect();
         issues.sort_by_key(|i| i.number);
         Ok(issues)
+    }
+
+    async fn list_labeled_pulls(
+        &self,
+        repo: &str,
+        label: &str,
+    ) -> anyhow::Result<Vec<PullRequest>> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .calls
+            .push(format!("list_pulls repo={repo} label={label}"));
+        Ok(state
+            .issues
+            .iter()
+            .filter(|i| i.repo == repo && i.labels.iter().any(|l| l == label))
+            .filter_map(|i| {
+                Some(PullRequest {
+                    number: i.number,
+                    author: i.author.clone(),
+                    title: i.title.clone(),
+                    body: i.body.clone(),
+                    head: i.head.clone()?,
+                    base: "main".to_string(),
+                })
+            })
+            .collect())
     }
 
     async fn issue_labels(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>> {
@@ -285,6 +324,14 @@ impl GitOps for FakeGit {
             clone_path.display()
         ));
         Ok(self.default_branch.clone())
+    }
+
+    fn sync_branch(&self, clone_path: &Path, branch: &str, _token: &str) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!(
+            "sync_branch path={} branch={branch}",
+            clone_path.display()
+        ));
+        Ok(())
     }
 
     fn has_new_commits(

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use cm_git::GitOps;
-use cm_github::{GithubClient, Issue};
+use cm_github::{GithubClient, Issue, PullRequest};
 
 use crate::backoff::Backoff;
 use crate::claude_cli::{Claude, ClaudeRun, RunObserver, Stream};
@@ -257,6 +257,7 @@ impl Worker<'_> {
                 }
             }
         }
+        self.review_tagged_pulls(repo, tally).await?;
         // The repo evidently answers and its clone syncs, so an earlier
         // repo-wide warning is no longer the current state, said again next
         // time it happens, which a drained or wholly-blocked backlog would
@@ -552,6 +553,27 @@ worker's job, and the box has no credentials for you to do it with.
                  retrying next sweep"
             );
         }
+        self.review(
+            repo,
+            number,
+            &format!("GitHub issue #{number} in {}", repo.repo),
+            &quote_issue(issue),
+            &branch,
+            base,
+        )?;
+        self.ship(repo, issue, &branch, base).await
+    }
+
+    /// `REVIEW_ROUNDS` review-and-fix runs over `branch`, one after another.
+    fn review(
+        &self,
+        repo: &RepoEntry,
+        number: u64,
+        what: &str,
+        quoted: &str,
+        branch: &str,
+        base: &str,
+    ) -> anyhow::Result<()> {
         for round in 1..=self.config.review_rounds {
             self.log(&format!(
                 "{}#{number}: review round {round}/{}",
@@ -564,10 +586,80 @@ worker's job, and the box has no credentials for you to do it with.
                 &repo.clone_path,
                 &self.config.implement_model,
                 &self.config.implement_effort,
-                &review_prompt(&repo.repo, issue, &branch, base, round),
+                &review_prompt(what, quoted, branch, base, round),
             )?;
         }
-        self.ship(repo, issue, &branch, base).await
+        Ok(())
+    }
+
+    /// Pull requests tagged `<label>:review` get another `REVIEW_ROUNDS` of
+    /// review-and-fix, pushed onto the PR, and lose the tag. Only the
+    /// instance's own PRs: the branch is fed to a run with every permission,
+    /// so a tag on somebody else's PR is not an invitation to review it.
+    async fn review_tagged_pulls(&self, repo: &RepoEntry, tally: &mut Tally) -> anyhow::Result<()> {
+        let label = self.review_label();
+        for pull in self.github.list_labeled_pulls(&repo.repo, &label).await? {
+            let number = pull.number;
+            self.status.doing(Activity::on(
+                Stage::Sweeping,
+                format!("{}#{number}", repo.repo),
+            ));
+            if pull.author != self.github.login() {
+                tally.skipped += 1;
+                self.log(&format!(
+                    "{}#{number}: tagged {label} but opened by @{}, not us, skipping",
+                    repo.repo, pull.author
+                ));
+                continue;
+            }
+            if self.backoff.resting(&issue_failure_key(&repo.repo, number)) {
+                tally.resting += 1;
+                continue;
+            }
+            match self.review_pull(repo, &pull).await {
+                Ok(()) => {
+                    tally.reviewed += 1;
+                    self.github.remove_label(&repo.repo, number, &label).await?;
+                    self.notifier.forget(&issue_failure_key(&repo.repo, number));
+                    self.backoff.forget(&issue_failure_key(&repo.repo, number));
+                    let url = format!("https://github.com/{}/pull/{number}", repo.repo);
+                    self.log(&format!("{}#{number}: reviewed: {url}", repo.repo));
+                    self.status.note(
+                        Level::Good,
+                        format!("reviewed {}#{number}: {url}", repo.repo),
+                    );
+                    self.notifier
+                        .post(&format!(":mag: reviewed {}#{number}: {url}", repo.repo));
+                }
+                Err(err) => {
+                    tally.failed += 1;
+                    self.report_issue_failure(repo, number, &err);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn review_pull(&self, repo: &RepoEntry, pull: &PullRequest) -> anyhow::Result<()> {
+        self.git
+            .sync_default(&repo.clone_path, &clone_url(&repo.repo), self.token)
+            .with_context(|| format!("syncing {}", repo.repo))?;
+        self.git
+            .sync_branch(&repo.clone_path, &pull.head, self.token)
+            .with_context(|| format!("checking out {}", pull.head))?;
+        self.review(
+            repo,
+            pull.number,
+            &format!("pull request #{} in {}", pull.number, repo.repo),
+            &quote_pull(pull),
+            &pull.head,
+            &pull.base,
+        )?;
+        self.status.doing(Activity::on(
+            Stage::Shipping,
+            format!("{}#{}", repo.repo, pull.number),
+        ));
+        self.git.push(&repo.clone_path, &pull.head, self.token)
     }
 
     /// Push what Claude committed and open the PR. Returns the PR's URL.
@@ -733,6 +825,10 @@ worker's job, and the box has no credentials for you to do it with.
 
     fn planned_label(&self) -> String {
         format!("{}:planned", self.config.label)
+    }
+
+    fn review_label(&self) -> String {
+        format!("{}:review", self.config.label)
     }
 
     fn done_label(&self) -> String {
@@ -982,23 +1078,34 @@ fn fenced(text: &str) -> String {
 
 /// One branch per issue, so two instances never collide: an issue belongs to
 /// exactly one queue.
-/// One review-and-fix pass over what the implementing run committed. The
+/// One review-and-fix pass over a branch. After an implementing run the
 /// rounds run before the push, so the PR opens with the fixes already on it
 /// and a round that fails leaves nothing half-reviewed on GitHub.
-fn review_prompt(repo: &str, issue: &Issue, branch: &str, base: &str, round: u32) -> String {
+fn review_prompt(what: &str, quoted: &str, branch: &str, base: &str, round: u32) -> String {
     format!(
-        "Review round {round} of the change on branch {branch} for GitHub issue
-#{} in {repo}, following this repo's CLAUDE.md. Check out {branch} and review
-`git diff {base}...{branch}` against the issue quoted below as a strict code
+        "Review round {round} of the change on branch {branch} for {what},
+following this repo's CLAUDE.md. Check out {branch} and review
+`git diff {base}...{branch}` against what is quoted below as a strict code
 reviewer: correctness bugs first, then missing tests, then anything CLAUDE.md
 forbids. Fix every real problem you find, run the test/lint commands from
 CLAUDE.md, and commit each fix as its own Conventional Commit on {branch}. If
 nothing needs fixing, commit nothing. Do NOT push, do NOT open a pull request,
 do NOT merge anything.
 
-{}",
-        issue.number,
-        quote_issue(issue)
+{quoted}"
+    )
+}
+
+/// The pull request as Claude gets to see it, fenced like [`quote_issue`].
+fn quote_pull(pull: &PullRequest) -> String {
+    format!(
+        "## The pull request\n\n{}",
+        fenced(&format!(
+            "#{} {}\n\n{}",
+            pull.number,
+            pull.title,
+            pull.body.trim()
+        ))
     )
 }
 
@@ -1364,6 +1471,59 @@ mod tests {
         let last = snapshot.last_sweep.expect("two sweeps finished");
         assert_eq!(last.tally.resting, 1);
         assert_eq!(last.tally.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn a_pull_tagged_for_review_is_reviewed_pushed_and_untagged() {
+        let review = format!("{LABEL}:review");
+        let mut config = config(
+            vec![repo("foro-sh/foro", "foro", &[])],
+            LABEL,
+            "Claudius Maximus",
+        );
+        config.review_rounds = 2;
+        let harness = Harness::new(
+            config,
+            vec![
+                FakeIssue::pull(
+                    "foro-sh/foro",
+                    12,
+                    FakeGithub::LOGIN,
+                    "claude/issue-7",
+                    &[&review],
+                ),
+                FakeIssue::pull("foro-sh/foro", 13, "stranger", "evil", &[&review]),
+            ],
+            FakeClaude::default(),
+        );
+
+        harness.sweep().await;
+
+        let prompts = harness.claude.prompts();
+        assert_eq!(
+            prompts.len(),
+            2,
+            "two rounds on our PR, none on the stranger's"
+        );
+        assert!(prompts[0].contains("Review round 1"), "{}", prompts[0]);
+        assert!(prompts[0].contains("pull request #12"), "{}", prompts[0]);
+        assert!(
+            prompts[0].contains("main...claude/issue-7"),
+            "{}",
+            prompts[0]
+        );
+        assert!(
+            harness
+                .git
+                .calls()
+                .contains(&"push path=/clones/foro branch=claude/issue-7".to_string()),
+            "{:?}",
+            harness.git.calls()
+        );
+        assert!(harness.github.labels("foro-sh/foro", 12).is_empty());
+        assert_eq!(harness.github.labels("foro-sh/foro", 13), vec![review]);
+        assert!(harness.github.pulls().is_empty(), "no new PR is opened");
+        assert_eq!(harness.snapshot().last_sweep.unwrap().tally.reviewed, 1);
     }
 
     #[tokio::test]
@@ -1927,6 +2087,9 @@ mod tests {
         // which reads as a broken worker rather than as an empty run.
         struct CommitlessGit;
         impl GitOps for CommitlessGit {
+            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
+                unreachable!("no pull request is tagged for review here")
+            }
             fn sync_default(
                 &self,
                 _: &std::path::Path,
@@ -2019,6 +2182,9 @@ mod tests {
     async fn a_failed_push_leaves_the_issue_for_the_next_sweep() {
         struct UnpushableGit;
         impl GitOps for UnpushableGit {
+            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
+                unreachable!("no pull request is tagged for review here")
+            }
             fn sync_default(
                 &self,
                 _: &std::path::Path,
@@ -2311,6 +2477,9 @@ mod tests {
         // for the next sweep rather than spending a connect timeout per issue.
         struct SelectivelyFailingGit;
         impl GitOps for SelectivelyFailingGit {
+            fn sync_branch(&self, _: &std::path::Path, _: &str, _: &str) -> anyhow::Result<()> {
+                unreachable!("no pull request is tagged for review here")
+            }
             fn sync_default(
                 &self,
                 clone_path: &std::path::Path,

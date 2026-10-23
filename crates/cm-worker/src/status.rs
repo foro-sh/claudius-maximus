@@ -171,6 +171,8 @@ pub struct Tally {
     pub seen: u64,
     pub planned: u64,
     pub shipped: u64,
+    /// Pull requests given extra review rounds on request.
+    pub reviewed: u64,
     pub skipped: u64,
     pub resting: u64,
     pub failed: u64,
@@ -179,12 +181,13 @@ pub struct Tally {
 impl Tally {
     pub fn line(&self, took: Duration) -> String {
         format!(
-            "sweep done in {}: {} issue(s) seen, {} planned, {} shipped, {} skipped, {} resting, \
-             {} failed",
+            "sweep done in {}: {} issue(s) seen, {} planned, {} shipped, {} reviewed, {} skipped, \
+             {} resting, {} failed",
             human(took),
             self.seen,
             self.planned,
             self.shipped,
+            self.reviewed,
             self.skipped,
             self.resting,
             self.failed
