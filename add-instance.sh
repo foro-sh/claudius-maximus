@@ -275,9 +275,9 @@ REPOS=$repos_for_env
 GITHUB_CLIENT_ID=$GITHUB_CLIENT_ID
 LABEL=$label
 INSTANCE=$instance
-PLAN_MODEL=${PLAN_MODEL:-claude-opus-5}
+PLAN_MODEL=${PLAN_MODEL:-claude-opus-5-5}
 PLAN_EFFORT=${PLAN_EFFORT:-high}
-IMPLEMENT_MODEL=${IMPLEMENT_MODEL:-claude-sonnet-5}
+IMPLEMENT_MODEL=${IMPLEMENT_MODEL:-claude-sonnet-5-5}
 IMPLEMENT_EFFORT=${IMPLEMENT_EFFORT:-high}
 POLL_INTERVAL=${POLL_INTERVAL:-60}
 # Where this instance's status page, /metrics and /healthz live. 'off' turns

@@ -9,7 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::time::Duration;
 
 use crate::token_store::{FileStore, TokenStore};
-use crate::{GithubClient, Issue, IssueComment};
+use crate::{GithubClient, Issue, IssueComment, PullRequest};
 
 /// The REST API host, and, separately, the website, which is where the
 /// device flow endpoints live.
@@ -162,6 +162,40 @@ impl GithubClient for OctocrabGithubClient {
                 author: i.user.login,
                 title: i.title,
                 body: i.body.unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    async fn list_labeled_pulls(
+        &self,
+        repo: &str,
+        label: &str,
+    ) -> anyhow::Result<Vec<PullRequest>> {
+        let (owner, name) = self.repo(repo)?;
+        // ponytail: the pulls endpoint cannot filter on a label, so every open
+        // PR is listed and filtered here. Fine at a few hundred open PRs; the
+        // search API is the upgrade past that.
+        let page = self
+            .crab
+            .pulls(owner, name)
+            .list()
+            .state(State::Open)
+            .per_page(100)
+            .send()
+            .await
+            .with_context(|| format!("listing {repo} pull requests"))?;
+
+        let pulls = self.crab.all_pages(page).await?;
+        Ok(pulls
+            .into_iter()
+            .filter(|p| p.labels.iter().flatten().any(|l| l.name == label))
+            .map(|p| PullRequest {
+                number: p.number,
+                author: p.user.map(|u| u.login).unwrap_or_default(),
+                title: p.title.unwrap_or_default(),
+                body: p.body.unwrap_or_default(),
+                head: p.head.ref_field,
+                base: p.base.ref_field,
             })
             .collect())
     }
@@ -789,6 +823,42 @@ mod tests {
             "head": { "label": format!("foro-sh:{head}"), "ref": head, "sha": "deadbeef" },
             "base": { "label": "foro-sh:main", "ref": "main", "sha": "cafebabe" },
         })
+    }
+
+    #[tokio::test]
+    async fn list_labeled_pulls_keeps_only_pulls_carrying_the_label() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        let mut tagged = pull_request_json(30, "claude/issue-12");
+        tagged["labels"] = json!([{ "id": 1, "node_id": "L_1",
+            "url": "https://api.github.com/l/1", "name": "claudius-maximus:review",
+            "color": "ededed", "default": false }]);
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/foro/pulls"))
+            .and(query_param("state", "open"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([tagged, pull_request_json(31, "claude/issue-13")])),
+            )
+            .mount(&server)
+            .await;
+
+        let pulls = client
+            .list_labeled_pulls("foro-sh/foro", "claudius-maximus:review")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            pulls,
+            vec![PullRequest {
+                number: 30,
+                author: "claudius".to_owned(),
+                title: "something to do".to_owned(),
+                body: String::new(),
+                head: "claude/issue-12".to_owned(),
+                base: "main".to_owned(),
+            }]
+        );
     }
 
     #[tokio::test]

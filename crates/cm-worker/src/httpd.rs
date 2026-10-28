@@ -276,6 +276,7 @@ fn json(snapshot: &Snapshot) -> serde_json::Value {
             "seen": sweep.tally.seen,
             "planned": sweep.tally.planned,
             "shipped": sweep.tally.shipped,
+            "reviewed": sweep.tally.reviewed,
             "skipped": sweep.tally.skipped,
             "resting": sweep.tally.resting,
             "failed": sweep.tally.failed,
@@ -578,13 +579,14 @@ fn page(snapshot: &Snapshot) -> String {
     let sweep = match &snapshot.last_sweep {
         Some(sweep) => format!(
             "last sweep <time data-epoch={}></time>, {} ago, took {}: {} seen, {} planned, {} \
-             shipped, {} skipped, {} resting, {} failed",
+             shipped, {} reviewed, {} skipped, {} resting, {} failed",
             sweep.ended_epoch,
             human(sweep.ended_ago),
             human(sweep.took),
             sweep.tally.seen,
             sweep.tally.planned,
             sweep.tally.shipped,
+            sweep.tally.reviewed,
             sweep.tally.skipped,
             sweep.tally.resting,
             sweep.tally.failed

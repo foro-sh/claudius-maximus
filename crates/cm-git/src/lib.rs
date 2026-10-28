@@ -36,6 +36,12 @@ pub trait GitOps: Send + Sync {
         token: &str,
     ) -> anyhow::Result<String>;
 
+    /// Fetch `branch` from `origin`, hard-reset the local copy onto it and
+    /// check it out, untracked files cleared, as [`GitOps::sync_default`]
+    /// does for the default branch. For reviewing a PR whose branch may have
+    /// moved on GitHub since this clone last saw it.
+    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> anyhow::Result<()>;
+
     /// True if `branch` exists locally and carries commits `base` does not.
     /// False for a branch that was never created: a Claude run that committed
     /// nothing leaves one or the other, and neither is a pull request.
@@ -71,37 +77,15 @@ impl GitOps for Git2Ops {
                 .to_owned()
         };
 
-        let mut fetch_options = FetchOptions::new();
-        fetch_options.remote_callbacks(credentials(token));
-        remote.fetch(&[&default], Some(&mut fetch_options), None)?;
-
-        let upstream = repo
-            .find_branch(&format!("origin/{default}"), BranchType::Remote)?
-            .into_reference()
-            .peel_to_commit()?;
-
-        // A forced reference update rather than `Repository::branch`, which
-        // refuses to force a branch that is already HEAD: the common case
-        // here, since the worker re-syncs a branch it is already sitting on.
-        repo.reference(
-            &format!("refs/heads/{default}"),
-            upstream.id(),
-            true,
-            "sync_default",
-        )?;
-        repo.set_head(&format!("refs/heads/{default}"))?;
-        // The checkout is what clears untracked files, which a plain
-        // `reset --hard` leaves behind: the worker reuses one clone across
-        // issues, so whatever a killed Claude run dropped in the tree would
-        // otherwise be swept into the next issue's commits by Claude.
-        // Ignored files (`target/`) stay: that's the build cache.
-        // `reset` can't do it in one step; it overrides the checkout strategy
-        // it is handed.
-        let mut checkout = CheckoutBuilder::new();
-        checkout.force().remove_untracked(true);
-        repo.checkout_tree(upstream.as_object(), Some(&mut checkout))?;
-        repo.reset(upstream.as_object(), ResetType::Hard, None)?;
+        drop(remote);
+        reset_onto_origin(&repo, &default, token)?;
         Ok(default)
+    }
+
+    fn sync_branch(&self, clone_path: &Path, branch: &str, token: &str) -> Result<()> {
+        let repo = Repository::open(clone_path)
+            .with_context(|| format!("opening the clone at {}", clone_path.display()))?;
+        reset_onto_origin(&repo, branch, token)
     }
 
     fn has_new_commits(&self, clone_path: &Path, branch: &str, base: &str) -> Result<bool> {
@@ -153,6 +137,43 @@ impl GitOps for Git2Ops {
         }
         Ok(())
     }
+}
+
+/// Fetch `branch` from origin, point the local branch at it, check it out.
+fn reset_onto_origin(repo: &Repository, branch: &str, token: &str) -> Result<()> {
+    let mut remote = repo.find_remote("origin")?;
+    let mut fetch_options = FetchOptions::new();
+    fetch_options.remote_callbacks(credentials(token));
+    remote
+        .fetch(&[branch], Some(&mut fetch_options), None)
+        .with_context(|| format!("fetching {branch} from origin"))?;
+    let upstream = repo
+        .find_branch(&format!("origin/{branch}"), BranchType::Remote)?
+        .into_reference()
+        .peel_to_commit()?;
+
+    // A forced reference update rather than `Repository::branch`, which
+    // refuses to force a branch that is already HEAD: the common case
+    // here, since the worker re-syncs a branch it is already sitting on.
+    repo.reference(
+        &format!("refs/heads/{branch}"),
+        upstream.id(),
+        true,
+        "reset_onto_origin",
+    )?;
+    repo.set_head(&format!("refs/heads/{branch}"))?;
+    // The checkout is what clears untracked files, which a plain
+    // `reset --hard` leaves behind: the worker reuses one clone across
+    // issues, so whatever a killed Claude run dropped in the tree would
+    // otherwise be swept into the next issue's commits by Claude.
+    // Ignored files (`target/`) stay: that's the build cache.
+    // `reset` can't do it in one step; it overrides the checkout strategy
+    // it is handed.
+    let mut checkout = CheckoutBuilder::new();
+    checkout.force().remove_untracked(true);
+    repo.checkout_tree(upstream.as_object(), Some(&mut checkout))?;
+    repo.reset(upstream.as_object(), ResetType::Hard, None)?;
+    Ok(())
 }
 
 /// The clone at `clone_path`, cloned from `remote_url` if it isn't there yet.
@@ -265,6 +286,35 @@ mod tests {
                 .unwrap()
                 .id()
         );
+    }
+
+    #[test]
+    fn sync_branch_checks_out_what_origin_has_on_the_branch() {
+        let (tmp, clone) = fixture("main");
+        let bare = tmp.path().join("remote.git");
+        // Someone else's clone moves the PR branch on origin.
+        let other = Repository::clone(bare.to_str().unwrap(), tmp.path().join("other")).unwrap();
+        branch_off_head(other.workdir().unwrap(), "claude/issue-1");
+        fs::write(other.workdir().unwrap().join("fix.txt"), "fix\n").unwrap();
+        commit_all(&other, "fix: something");
+        let pushed = other.head().unwrap().peel_to_commit().unwrap().id();
+        other
+            .find_remote("origin")
+            .unwrap()
+            .push(
+                &["refs/heads/claude/issue-1:refs/heads/claude/issue-1"],
+                None,
+            )
+            .unwrap();
+
+        Git2Ops
+            .sync_branch(&clone, "claude/issue-1", TOKEN)
+            .unwrap();
+
+        let repo = Repository::open(&clone).unwrap();
+        assert_eq!(repo.head().unwrap().shorthand(), Some("claude/issue-1"));
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), pushed);
+        assert!(clone.join("fix.txt").exists());
     }
 
     #[test]

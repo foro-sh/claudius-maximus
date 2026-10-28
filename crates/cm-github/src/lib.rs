@@ -30,6 +30,19 @@ pub struct IssueComment {
     pub body: String,
 }
 
+/// One open pull request, as the worker needs it to review one on request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    pub number: u64,
+    pub author: String,
+    pub title: String,
+    pub body: String,
+    /// The branch the PR is opened from.
+    pub head: String,
+    /// The branch it is opened onto.
+    pub base: String,
+}
+
 /// Everything the worker needs from GitHub. `repo` is always `"owner/name"`.
 ///
 /// This is the entire GitHub surface `worker.sh` used through `gh` today:
@@ -46,6 +59,9 @@ pub trait GithubClient: Send + Sync {
     /// Open issues carrying `label`, pull requests excluded. A closed issue
     /// is finished work no matter what labels it still has on it.
     async fn list_labeled_issues(&self, repo: &str, label: &str) -> anyhow::Result<Vec<Issue>>;
+    /// Open pull requests carrying `label`.
+    async fn list_labeled_pulls(&self, repo: &str, label: &str)
+    -> anyhow::Result<Vec<PullRequest>>;
     async fn issue_labels(&self, repo: &str, number: u64) -> anyhow::Result<Vec<String>>;
     async fn add_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
     async fn remove_label(&self, repo: &str, number: u64, label: &str) -> anyhow::Result<()>;
