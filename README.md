@@ -167,7 +167,7 @@ LABEL=claudius-maximus           # optional; defaults to claudius-maximus
 INSTANCE=Claudius Maximus        # optional; name in logs + Mattermost
 PLAN_MODEL=claude-opus-5         # optional; worker's plan step
 PLAN_EFFORT=high                 # optional; low|medium|high|xhigh|max
-IMPLEMENT_MODEL=claude-sonnet-5  # optional; worker's implement step
+IMPLEMENT_MODEL=claude-sonnet-5-5  # optional; worker's implement step
 IMPLEMENT_EFFORT=high            # optional; low|medium|high|xhigh|max
 REVIEW_ROUNDS=3                  # optional; review-and-fix runs before the push, 0 = none
 POLL_INTERVAL=60                 # optional, seconds
