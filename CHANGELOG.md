@@ -1,3 +1,15 @@
+## [0.9.0](https://github.com/foro-sh/claudius-maximus/compare/v0.8.0...v0.9.0) (2026-10-28)
+
+### Features
+
+* **git:** check out a branch as origin has it ([62724e8](https://github.com/foro-sh/claudius-maximus/commit/62724e8a7359f6f0f2885848dad71137d428b3ca))
+* **github:** list open pull requests carrying a label ([f0c745a](https://github.com/foro-sh/claudius-maximus/commit/f0c745a49bdc0a4c72cccb08c35213bcdbd81684))
+* **worker:** review pull requests tagged <label>:review ([4eb52e3](https://github.com/foro-sh/claudius-maximus/commit/4eb52e3a5f74185836ec42e65df5794223867c6f))
+
+### Bug Fixes
+
+* **worker:** count a failed label removal against the pull, not the repo ([f97b218](https://github.com/foro-sh/claudius-maximus/commit/f97b218634a7b9313ab6c0c91af4877671d7923f))
+
 ## [0.8.0](https://github.com/foro-sh/claudius-maximus/compare/v0.7.1...v0.8.0) (2026-10-22)
 
 ### Features
