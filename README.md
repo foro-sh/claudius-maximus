@@ -165,7 +165,7 @@ REPOS=foro-sh/claudius-maximus=/home/claudius-maximus/repos/claudius-maximus,for
 GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx  # the OAuth App the device flow authorizes against
 LABEL=claudius-maximus           # optional; defaults to claudius-maximus
 INSTANCE=Claudius Maximus        # optional; name in logs + Mattermost
-PLAN_MODEL=claude-opus-5         # optional; worker's plan step
+PLAN_MODEL=claude-opus-5-5       # optional; worker's plan step
 PLAN_EFFORT=high                 # optional; low|medium|high|xhigh|max
 IMPLEMENT_MODEL=claude-sonnet-5-5  # optional; worker's implement step
 IMPLEMENT_EFFORT=high            # optional; low|medium|high|xhigh|max

@@ -63,7 +63,7 @@ impl Config {
             github_client_id,
             label: env_or("LABEL", "claudius-maximus"),
             instance: env_or("INSTANCE", "Claudius Maximus"),
-            plan_model: env_or("PLAN_MODEL", "claude-opus-5"),
+            plan_model: env_or("PLAN_MODEL", "claude-opus-5-5"),
             plan_effort: env_or("PLAN_EFFORT", "high"),
             implement_model: env_or("IMPLEMENT_MODEL", "claude-sonnet-5-5"),
             implement_effort: env_or("IMPLEMENT_EFFORT", "high"),
