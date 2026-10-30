@@ -31,7 +31,7 @@ describes the binary that issue specifies.
 | Labeled `$LABEL`, not yet `:planned`            | Claude posts an implementation plan, adds `$LABEL:planned`                                                                                      |
 | `:planned`                                      | Claude implements and commits on `claude/issue-N`, then reviews its own diff and commits fixes `REVIEW_ROUNDS` times (default 3); the worker pushes it and opens the PR (`Closes #N`), adds `:done`, removes the trigger label |
 | `:done`                                         | Ignored                                                                                                                                        |
-| PR labeled `$LABEL:review`, opened by this instance | Claude reviews the PR's branch and commits fixes `REVIEW_ROUNDS` more times; the worker pushes them onto the PR and removes the label |
+| PR labeled `$LABEL:review`, opened by this instance | Claude reviews the PR's branch and commits fixes `REVIEW_ROUNDS` more times; the worker pushes them onto the PR and removes the label. If people left comments or reviews on the PR, the first round answers those instead, and its point-by-point report is posted on the PR as the reply |
 
 A reboot loses nothing — all state is in labels.
 
@@ -60,7 +60,9 @@ foro-sh/foro=/home/claudius-maximus/repos/foro=danielsteman|thijssdaniels
 A **public** repo needs this: without it, a stranger's issue becomes a Claude
 prompt the moment someone applies the label. A private repo can go without —
 filing already requires access. Applying the trigger label is the only gate;
-there is no separate approval step.
+there is no separate approval step. The same allowlist decides whose PR
+comments and reviews a `:review` round is handed; on a repo without one,
+everyone's are.
 
 ## Setup
 

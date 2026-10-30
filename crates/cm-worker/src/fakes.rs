@@ -22,6 +22,8 @@ pub struct FakeIssue {
     pub body: String,
     pub labels: Vec<String>,
     pub comments: Vec<IssueComment>,
+    /// Review summaries and inline comments, served when this is a PR.
+    pub review_feedback: Vec<IssueComment>,
     pub blocked: bool,
     /// `Some(head)` makes this a pull request from `head` onto `main`: on
     /// GitHub a PR is an issue too, with the same labels.
@@ -38,6 +40,7 @@ impl FakeIssue {
             body: format!("the work order for issue {number}"),
             labels: labels.iter().map(|l| l.to_string()).collect(),
             comments: Vec::new(),
+            review_feedback: Vec::new(),
             blocked: false,
             head: None,
         }
@@ -65,6 +68,15 @@ impl FakeIssue {
     /// A comment somebody other than the worker left.
     pub fn with_comment_by(mut self, author: &str, body: &str) -> Self {
         self.comments.push(IssueComment {
+            author: author.to_string(),
+            body: body.to_string(),
+        });
+        self
+    }
+
+    /// A review comment left on this pull request.
+    pub fn with_review_by(mut self, author: &str, body: &str) -> Self {
+        self.review_feedback.push(IssueComment {
             author: author.to_string(),
             body: body.to_string(),
         });
@@ -250,6 +262,23 @@ impl GithubClient for FakeGithub {
             .iter()
             .find(|i| i.repo == repo && i.number == number)
             .map(|i| i.comments.clone())
+            .unwrap_or_default())
+    }
+
+    async fn pull_review_feedback(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> anyhow::Result<Vec<IssueComment>> {
+        let mut state = self.state.lock().unwrap();
+        state
+            .calls
+            .push(format!("review_feedback repo={repo} num={number}"));
+        Ok(state
+            .issues
+            .iter()
+            .find(|i| i.repo == repo && i.number == number)
+            .map(|i| i.review_feedback.clone())
             .unwrap_or_default())
     }
 

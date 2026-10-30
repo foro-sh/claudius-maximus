@@ -71,6 +71,14 @@ pub trait GithubClient: Send + Sync {
     /// written one sweep and used the next, and GitHub is the only state the
     /// worker keeps.
     async fn issue_comments(&self, repo: &str, number: u64) -> anyhow::Result<Vec<IssueComment>>;
+    /// What reviewers left on a pull request beyond its conversation: each
+    /// submitted review's summary, then every inline comment with its
+    /// `path:line` in front of the body. Reviews with no summary are left out.
+    async fn pull_review_feedback(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> anyhow::Result<Vec<IssueComment>>;
     /// Open a pull request from `head` onto `base`, returning its URL. If one
     /// is already open for `head` (the branch is reused across retries), its
     /// URL comes back instead: a second PR for one issue is the thing to
