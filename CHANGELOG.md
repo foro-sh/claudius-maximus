@@ -1,3 +1,15 @@
+## [0.10.0](https://github.com/foro-sh/claudius-maximus/compare/v0.9.0...v0.10.0) (2026-10-30)
+
+### Features
+
+* **github:** list a pull request's review summaries and inline comments ([dfe574c](https://github.com/foro-sh/claudius-maximus/commit/dfe574c6c234df723747a98b087fd490df3de542))
+* **worker:** answer review feedback on pull requests tagged :review ([0a753c8](https://github.com/foro-sh/claudius-maximus/commit/0a753c8a1d9364408c431d9f599a2e4ef2f9cca2))
+* **worker:** merge feat/review-feedback ([#21](https://github.com/foro-sh/claudius-maximus/issues/21)) ([f55ef51](https://github.com/foro-sh/claudius-maximus/commit/f55ef5136e4e28b141e40d4bbd47a0440d30d212))
+
+### Bug Fixes
+
+* **worker:** tell the worker's own replies apart by marker, not login ([0508504](https://github.com/foro-sh/claudius-maximus/commit/0508504e43c9faef74f6e31f405f883a5a80976e))
+
 ## [0.9.0](https://github.com/foro-sh/claudius-maximus/compare/v0.8.0...v0.9.0) (2026-10-28)
 
 ### Features
