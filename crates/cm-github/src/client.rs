@@ -278,6 +278,55 @@ impl GithubClient for OctocrabGithubClient {
             .collect())
     }
 
+    async fn pull_review_feedback(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> anyhow::Result<Vec<IssueComment>> {
+        let (owner, name) = self.repo(repo)?;
+        let pulls = self.crab.pulls(owner, name);
+        let reviews = pulls
+            .list_reviews(number)
+            .per_page(100)
+            .send()
+            .await
+            .with_context(|| format!("listing reviews on {repo}#{number}"))?;
+        let inline = pulls
+            .list_comments(Some(number))
+            .per_page(100)
+            .send()
+            .await
+            .with_context(|| format!("listing review comments on {repo}#{number}"))?;
+
+        let summaries = self
+            .crab
+            .all_pages(reviews)
+            .await
+            .with_context(|| format!("paging the reviews on {repo}#{number}"))?
+            .into_iter()
+            .filter_map(|r| {
+                let body = r.body.filter(|b| !b.trim().is_empty())?;
+                Some(IssueComment {
+                    author: r.user.map(|u| u.login).unwrap_or_default(),
+                    body,
+                })
+            });
+        let comments = self
+            .crab
+            .all_pages(inline)
+            .await
+            .with_context(|| format!("paging the review comments on {repo}#{number}"))?
+            .into_iter()
+            .map(|c| IssueComment {
+                author: c.user.map(|u| u.login).unwrap_or_default(),
+                body: match c.line.or(c.original_line) {
+                    Some(line) => format!("{}:{line}: {}", c.path, c.body),
+                    None => format!("{}: {}", c.path, c.body),
+                },
+            });
+        Ok(summaries.chain(comments).collect())
+    }
+
     async fn create_pull_request(
         &self,
         repo: &str,
@@ -779,6 +828,72 @@ mod tests {
                     body: "a later note".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_review_feedback_lists_review_summaries_then_inline_comments() {
+        let server = MockServer::start().await;
+        let client = client(&server).await;
+        let review = |id: u64, body: &str| {
+            json!({
+                "id": id,
+                "node_id": format!("PRR_{id}"),
+                "html_url": format!("https://github.com/r/{id}"),
+                "user": author("danielsteman"),
+                "body": body,
+                "state": "CHANGES_REQUESTED",
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/platform/pulls/12/reviews"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([review(1, "needs work"), review(2, "")])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/platform/pulls/12/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "url": "https://api.github.com/c/9",
+                "id": 9,
+                "node_id": "PRRC_9",
+                "diff_hunk": "@@",
+                "path": "src/lib.rs",
+                "line": 4,
+                "commit_id": "deadbeef",
+                "original_commit_id": "deadbeef",
+                "user": author("danielsteman"),
+                "body": "off by one",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "html_url": "https://github.com/c/9",
+                "_links": {
+                    "self": { "href": "https://api.github.com/c/9" },
+                    "html": { "href": "https://github.com/c/9" },
+                    "pull_request": { "href": "https://api.github.com/p/12" },
+                },
+            }])))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client
+                .pull_review_feedback("foro-sh/platform", 12)
+                .await
+                .unwrap(),
+            vec![
+                IssueComment {
+                    author: "danielsteman".to_owned(),
+                    body: "needs work".to_owned(),
+                },
+                IssueComment {
+                    author: "danielsteman".to_owned(),
+                    body: "src/lib.rs:4: off by one".to_owned(),
+                },
+            ],
+            "a review with no summary is left out"
         );
     }
 
