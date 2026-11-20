@@ -75,7 +75,9 @@ done
 claude=$home/.local/bin/claude
 installed=$(cd "$home" && sudo -u "$user" -H "$claude" --version) \
     || die "$claude does not run, the install is broken"
-[[ $installed == "$version"* ]] || die "$claude reports '$installed', wanted $version"
+# `claude --version` prints "2.1.329 (Claude Code)": compare the first word, as a
+# prefix match would take 2.1.329 for a pin of 2.1.32.
+[[ ${installed%% *} == "$version" ]] || die "$claude reports '$installed', wanted $version"
 echo "$user: claude $version"
 
 install -d -o "$user" -g "$user" -m 700 "$home/.claude"
