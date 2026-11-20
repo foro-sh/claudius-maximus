@@ -22,7 +22,7 @@ use cm_github::OctocrabGithubClient;
 use config::Config;
 use heartbeat::Heartbeat;
 use notify::Notifier;
-use status::{Activity, Stage, Status};
+use status::{Activity, Level, Stage, Status};
 use systemd::Systemd;
 use worker::Worker;
 
@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     println!("{}: claude {installed}", config.instance);
+    status.claude_version(&installed, claude_cli::pinned_version());
     // Not fatal: the binary and the CLI are rolled out separately and do not
     // always land together, and with `Restart=always` a hard failure would be
     // a restart loop until the other half arrives.
@@ -64,6 +65,13 @@ async fn main() -> anyhow::Result<()> {
             "{}: warning: claude {installed} is installed but this build expects {}              (claude-code.version); run install-claude.sh",
             config.instance,
             claude_cli::pinned_version()
+        );
+        status.note(
+            Level::Bad,
+            format!(
+                "claude {installed} is installed, this build expects {}",
+                claude_cli::pinned_version()
+            ),
         );
     }
 

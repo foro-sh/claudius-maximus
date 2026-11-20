@@ -91,8 +91,16 @@ impl Worker<'_> {
             self.config.implement_model,
             self.config.poll_interval.as_secs(),
         ));
+        let claude = match self.status.snapshot().claude {
+            Some(claude) if claude.is_pinned() => format!(" on claude {}", claude.installed),
+            Some(claude) => format!(
+                " on claude {} (expected {})",
+                claude.installed, claude.pinned
+            ),
+            None => String::new(),
+        };
         self.notifier.post(&format!(
-            ":crown: {} is awake, draining the `{}` backlog in {}.",
+            ":crown: {} is awake{claude}, draining the `{}` backlog in {}.",
             self.config.instance,
             self.config.label,
             self.repo_names().join(" ")

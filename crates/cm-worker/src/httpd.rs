@@ -239,6 +239,11 @@ fn json(snapshot: &Snapshot) -> serde_json::Value {
         "now_epoch": snapshot.now_epoch,
         "uptime_seconds": snapshot.uptime.as_secs(),
         "poll_interval_seconds": snapshot.poll_interval.as_secs(),
+        "claude": snapshot.claude.as_ref().map(|claude| serde_json::json!({
+            "version": claude.installed,
+            "pinned": claude.pinned,
+            "is_pinned": claude.is_pinned(),
+        })),
         "activity": {
             "stage": snapshot.activity.stage.word(),
             "subject": snapshot.activity.subject,
@@ -448,6 +453,20 @@ fn metrics(snapshot: &Snapshot) -> String {
             sweep.took.as_secs().to_string(),
         );
     }
+    // An info metric, like `claudius_build_info`: the value is always 1 and
+    // the version is the label, so a dashboard can list which version each
+    // instance is on and alert on `version != pinned`.
+    if let Some(claude) = &snapshot.claude {
+        out.push_str(
+            "# HELP claudius_claude_info The claude CLI this instance runs (version), and the \
+             one this build expects (pinned).\n# TYPE claudius_claude_info gauge\n",
+        );
+        out.push_str(&format!(
+            "claudius_claude_info{{{labels},version=\"{}\",pinned=\"{}\"}} 1\n",
+            escape_label(&claude.installed),
+            escape_label(&claude.pinned)
+        ));
+    }
     // One series per stage rather than a number per stage: this is what makes
     // `claudius_stage{stage="implementing"}` graphable next to everything else.
     out.push_str("# HELP claudius_stage What the worker is doing, 1 for the current stage.\n");
@@ -627,9 +646,25 @@ fn page(snapshot: &Snapshot) -> String {
             .join("")
     };
 
+    let claude = match &snapshot.claude {
+        Some(claude) if claude.is_pinned() => {
+            format!(
+                " &middot; claude <code>{}</code>",
+                escape(&claude.installed)
+            )
+        }
+        Some(claude) => format!(
+            " &middot; claude <code>{}</code> <b class=warn>(this build expects {})</b>",
+            escape(&claude.installed),
+            escape(&claude.pinned)
+        ),
+        None => String::new(),
+    };
+
     PAGE.replace("%%INSTANCE%%", &escape(&snapshot.instance))
         .replace("%%LABEL%%", &escape(&snapshot.label))
         .replace("%%REPOS%%", &repos)
+        .replace("%%CLAUDE%%", &claude)
         .replace("%%STATE%%", state)
         .replace("%%HEADLINE%%", &escape(&snapshot.doing()))
         .replace("%%SUBLINE%%", &escape(&snapshot.line()))
@@ -669,6 +704,7 @@ h1 { font-size: 1.35rem; margin: 0; letter-spacing: .02em; }
 h1 span { color: var(--gold); }
 h2 { font-size: .95rem; margin: 0 0 .35rem; text-transform: lowercase; letter-spacing: .06em; }
 .chips { color: var(--dim); font-size: .85rem; margin: .35rem 0 1.5rem; }
+.chips .warn { color: var(--bad); font-weight: normal; }
 .chips code { color: var(--ink); background: var(--panel); padding: .1rem .4rem; border-radius: .3rem; }
 .now {
   border: 1px solid var(--edge); border-left: 4px solid var(--gold); border-radius: .6rem;
@@ -699,7 +735,7 @@ footer a { color: var(--gold); }
 </style>
 <main>
   <h1><span>&#9819;</span> %%INSTANCE%%</h1>
-  <div class=chips>draining <code>%%LABEL%%</code> in %%REPOS%%</div>
+  <div class=chips>draining <code>%%LABEL%%</code> in %%REPOS%%%%CLAUDE%%</div>
 
   <div class="now %%STATE%%">
     <b>%%HEADLINE%%</b>
@@ -758,6 +794,7 @@ mod tests {
             "claude-sonnet-5",
         ));
         status.heard("running cargo test --workspace");
+        status.claude_version("2.1.329", "2.1.329");
         status.snapshot()
     }
 
@@ -862,6 +899,46 @@ mod tests {
                 "stray line in /metrics: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_claude_version_is_on_the_metrics_the_page_and_the_json() {
+        let snapshot = working();
+        let metrics = body("/metrics", &snapshot);
+        assert!(
+            metrics.contains(
+                "claudius_claude_info{instance=\"Claudius Maximus\",label=\"claudius-maximus\",\
+                 version=\"2.1.329\",pinned=\"2.1.329\"} 1"
+            ),
+            "{metrics}"
+        );
+        assert!(body("/", &snapshot).contains("claude <code>2.1.329</code>"));
+        assert!(!body("/", &snapshot).contains("this build expects"));
+        let json: serde_json::Value =
+            serde_json::from_str(&body("/status.json", &snapshot)).unwrap();
+        assert_eq!(json["claude"]["version"], "2.1.329");
+        assert_eq!(json["claude"]["is_pinned"], true);
+    }
+
+    #[test]
+    fn a_version_other_than_the_pinned_one_is_said_on_the_page() {
+        let status = Status::new(&Config::sample());
+        status.claude_version("2.1.308", "2.1.329");
+        let snapshot = status.snapshot();
+
+        assert!(body("/", &snapshot).contains("this build expects 2.1.329"));
+        assert!(body("/metrics", &snapshot).contains("version=\"2.1.308\",pinned=\"2.1.329\""));
+        let json: serde_json::Value =
+            serde_json::from_str(&body("/status.json", &snapshot)).unwrap();
+        assert_eq!(json["claude"]["is_pinned"], false);
+    }
+
+    #[test]
+    fn no_version_probe_yet_means_no_claude_series() {
+        assert!(!body("/metrics", &snapshot()).contains("claudius_claude_info"));
+        let json: serde_json::Value =
+            serde_json::from_str(&body("/status.json", &snapshot())).unwrap();
+        assert!(json["claude"].is_null());
     }
 
     #[test]
