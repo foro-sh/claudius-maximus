@@ -176,6 +176,8 @@ binary=${CLAUDIUS_BINARY:-target/release/claudius-maximus}
 [[ -f claude-code.version && -n $(tr -d '[:space:]' < claude-code.version) ]] \
     || die "claude-code.version is missing or empty, it pins the claude CLI every instance installs"
 [[ -x install-claude.sh ]] || die "run me from the repo checkout (install-claude.sh not found here)"
+command -v npm >/dev/null || die "npm is not installed, install-claude.sh installs the claude CLI from the npm package"
+command -v jq >/dev/null || die "jq is not installed, install-claude.sh edits the user's Claude Code settings with it"
 
 home=/home/$user
 
