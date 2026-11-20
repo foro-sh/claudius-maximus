@@ -62,7 +62,8 @@ async fn main() -> anyhow::Result<()> {
     // a restart loop until the other half arrives.
     if !claude_cli::is_pinned(&installed) {
         println!(
-            "{}: warning: claude {installed} is installed but this build expects {}              (claude-code.version); run install-claude.sh",
+            "{}: warning: claude {installed} is installed but this build expects {} \
+             (claude-code.version); run install-claude.sh",
             config.instance,
             claude_cli::pinned_version()
         );
