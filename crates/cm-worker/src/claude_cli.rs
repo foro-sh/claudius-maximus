@@ -48,6 +48,45 @@ pub trait RunObserver: Sync {
 /// fake instead of spending quota (`fakes::FakeClaude`).
 pub trait Claude: Send + Sync {
     fn run(&self, run: ClaudeRun<'_>) -> anyhow::Result<String>;
+
+    /// The version of the installed CLI, bare (`2.1.329`). An error means
+    /// `claude` cannot be run at all.
+    fn version(&self) -> anyhow::Result<String>;
+}
+
+/// The CLI version this build expects, from `claude-code.version`: the one
+/// place the version is written, and what `install-claude.sh` installs. Baked
+/// in so the worker can say when the box is on another one (#25).
+pub fn pinned_version() -> &'static str {
+    include_str!("../../../claude-code.version").trim()
+}
+
+/// Whether the installed CLI is the one this build expects.
+pub fn is_pinned(installed: &str) -> bool {
+    installed == pinned_version()
+}
+
+/// The version out of `claude --version`, which prints `2.1.329 (Claude Code)`.
+/// Anything that does not start with a dotted version is an error rather than
+/// a version nobody can compare: it is the output of something that is not
+/// working.
+fn parse_version(output: &str) -> anyhow::Result<String> {
+    let token = output.split_whitespace().next().unwrap_or_default();
+    if !looks_like_version(token) {
+        anyhow::bail!("`claude --version` did not print a version: {output:?}");
+    }
+    Ok(token.to_owned())
+}
+
+/// `MAJOR.MINOR.PATCH`, each a number, with an optional `-pre` or `+build`
+/// suffix.
+fn looks_like_version(token: &str) -> bool {
+    let core = token.split(['-', '+']).next().unwrap_or_default();
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// How much stderr is kept for the error message on a failed run. A run that
@@ -137,6 +176,26 @@ impl Claude for ClaudeCli {
 
         Ok(out?.join("\n"))
     }
+
+    fn version(&self) -> anyhow::Result<String> {
+        let output = Command::new("claude")
+            .arg("--version")
+            // For the same reason as in `run`.
+            .env_remove("NOTIFY_SOCKET")
+            .env_remove("WATCHDOG_USEC")
+            .env_remove("WATCHDOG_PID")
+            .stdin(Stdio::null())
+            .output()
+            .context("could not start `claude --version`")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "`claude --version` exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_version(&String::from_utf8_lossy(&output.stdout))
+    }
 }
 
 /// Reads a pipe to EOF, handing every line to the observer as it lands and
@@ -221,6 +280,49 @@ mod tests {
         assert_eq!(
             kept[1], "and done",
             "a last line with no newline still counts"
+        );
+    }
+
+    #[test]
+    fn the_version_is_the_first_word_of_what_claude_prints() {
+        assert_eq!(parse_version("2.1.329 (Claude Code)\n").unwrap(), "2.1.329");
+        assert_eq!(parse_version("2.1.329\n").unwrap(), "2.1.329");
+        assert_eq!(
+            parse_version("2.2.0-beta.1 (Claude Code)").unwrap(),
+            "2.2.0-beta.1"
+        );
+    }
+
+    #[test]
+    fn output_that_is_not_a_version_is_an_error() {
+        for output in [
+            "",
+            "\n",
+            "claude native binary not installed\n",
+            "(Claude Code) 2.1.329",
+            "2.1 (Claude Code)",
+            "v2.1.329",
+            "2..329",
+        ] {
+            assert!(parse_version(output).is_err(), "{output:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_pinned_version_counts_as_pinned() {
+        assert!(is_pinned(pinned_version()));
+        assert!(!is_pinned("2.1.308"));
+        assert!(!is_pinned(""));
+    }
+
+    #[test]
+    fn the_baked_in_pin_is_a_version() {
+        // An empty or mangled claude-code.version would otherwise only show
+        // as every instance warning about a mismatch.
+        assert!(
+            looks_like_version(pinned_version()),
+            "claude-code.version holds {:?}",
+            pinned_version()
         );
     }
 

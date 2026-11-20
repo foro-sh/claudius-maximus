@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use backoff::Backoff;
 use claim::ClaimError;
+use claude_cli::Claude;
 use cm_github::OctocrabGithubClient;
 use config::Config;
 use heartbeat::Heartbeat;
@@ -38,6 +39,33 @@ async fn main() -> anyhow::Result<()> {
         config.mattermost_webhook_url.clone(),
         config.instance.clone(),
     ));
+
+    // Asked before anything is claimed or authorized: a box whose `claude`
+    // cannot run is the state a failed CLI update leaves behind (#25), and
+    // refusing to start shows in `systemctl status` at once, where the first
+    // claimed issue failing would be found by someone reading the journal.
+    let claude = claude_cli::ClaudeCli;
+    let installed = match claude.version() {
+        Ok(version) => version,
+        Err(err) => {
+            notifier.post(&format!(
+                ":no_entry: {} refused to start: claude cannot run: {err:#}",
+                config.instance
+            ));
+            return Err(err.context("claude cannot run, so no issue could be worked"));
+        }
+    };
+    println!("{}: claude {installed}", config.instance);
+    // Not fatal: the binary and the CLI are rolled out separately and do not
+    // always land together, and with `Restart=always` a hard failure would be
+    // a restart loop until the other half arrives.
+    if !claude_cli::is_pinned(&installed) {
+        println!(
+            "{}: warning: claude {installed} is installed but this build expects {}              (claude-code.version); run install-claude.sh",
+            config.instance,
+            claude_cli::pinned_version()
+        );
+    }
 
     // Claim the label before touching GitHub: two workers on one label open
     // competing PRs on the same issue.
@@ -115,7 +143,6 @@ async fn main() -> anyhow::Result<()> {
         OctocrabGithubClient::login_or_load(&config.instance, &config.github_client_id).await?;
     let token = github.token().to_owned();
     let git = cm_git::Git2Ops;
-    let claude = claude_cli::ClaudeCli;
 
     Worker {
         config: &config,
