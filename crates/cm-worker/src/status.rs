@@ -222,6 +222,20 @@ pub struct Event {
     pub text: String,
 }
 
+/// Which `claude` CLI this instance is running, and which one this build
+/// expects (`claude-code.version`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeVersion {
+    pub installed: String,
+    pub pinned: String,
+}
+
+impl ClaudeVersion {
+    pub fn is_pinned(&self) -> bool {
+        self.installed == self.pinned
+    }
+}
+
 /// A consistent view of the register, taken under one lock and then owned by
 /// whoever asked for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,6 +244,8 @@ pub struct Snapshot {
     pub label: String,
     pub repos: Vec<String>,
     pub poll_interval: Duration,
+    /// `None` until the startup probe has answered.
+    pub claude: Option<ClaudeVersion>,
     pub started_epoch: u64,
     pub now_epoch: u64,
     pub uptime: Duration,
@@ -309,6 +325,7 @@ pub struct Status {
 }
 
 struct Inner {
+    claude: Option<ClaudeVersion>,
     activity: Activity,
     activity_since: Instant,
     window: Shutter,
@@ -345,6 +362,7 @@ impl Status {
             started: Instant::now(),
             started_epoch: now_epoch(),
             inner: Mutex::new(Inner {
+                claude: None,
                 activity: Activity::bare(Stage::Rising),
                 activity_since: Instant::now(),
                 window: Shutter::Open,
@@ -356,6 +374,15 @@ impl Status {
                 said_nearly: false,
             }),
         }
+    }
+
+    /// Records the CLI version the startup probe found, next to the one this
+    /// build expects.
+    pub fn claude_version(&self, installed: &str, pinned: &str) {
+        self.inner.lock().unwrap().claude = Some(ClaudeVersion {
+            installed: installed.to_owned(),
+            pinned: pinned.to_owned(),
+        });
     }
 
     /// Moves to a new activity. The clock on "how long has this been going"
@@ -509,6 +536,7 @@ impl Status {
             label: self.label.clone(),
             repos: self.repos.clone(),
             poll_interval: self.poll_interval,
+            claude: inner.claude.clone(),
             started_epoch: self.started_epoch,
             now_epoch: now_epoch(),
             uptime: self.started.elapsed(),

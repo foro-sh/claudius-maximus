@@ -456,4 +456,8 @@ impl Claude for FakeClaude {
         run.observer.line(Stream::Stdout, &self.plan_text);
         Ok(self.plan_text.clone())
     }
+
+    fn version(&self) -> anyhow::Result<String> {
+        Ok(crate::claude_cli::pinned_version().to_owned())
+    }
 }

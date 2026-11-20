@@ -103,11 +103,13 @@ Three things it can't do for you:
    PRs for more review rounds. The worker moves those labels, it never
    creates them. Make them in GitHub's UI or with `gh` from your workstation.
 
-2. **The subscription login**, as the person who holds it:
+2. **The subscription login**, as the person who holds it. The script has
+   already installed the Claude Code CLI, at the version pinned in
+   `claude-code.version` (it needs `npm` and `jq` on the box), with its
+   auto-updater off, so there is nothing to install first:
 
    ```bash
    sudo -u claudius-maximus -H bash -l
-     npm install -g @anthropic-ai/claude-code   # >= 2.1.186, for RETRY_WATCHDOG
      claude login && claude doctor
      unset ANTHROPIC_API_KEY                    # and remove it from any profile
    ```
@@ -149,6 +151,38 @@ ssh <box> sudo systemctl restart claudius@claudius-maximus
 binary with no system libgit2, no OpenSSL, and no `git`, `gh` or `curl` to find
 at runtime. Build on a box matching the target architecture (or cross-compile);
 the only other thing the server needs is Claude Code.
+
+### Updating Claude Code
+
+The CLI never updates itself. Its version is written once, in
+`claude-code.version`, and `install-claude.sh` installs exactly that version
+into each instance user's `~/.local`. To move every instance to a new one, bump
+the file, then for each instance:
+
+```bash
+sudo systemctl stop claudius@claudius-maximus
+sudo ./install-claude.sh claudius-maximus
+sudo systemctl start claudius@claudius-maximus
+```
+
+Stopping first matters: the script clears the `.claude-code-*` leftovers of a
+failed update before it installs, and that must not happen under a run in
+flight. It also checks the installed `claude --version` against the pin, so a
+broken install (for example, no outbound HTTPS, which leaves npm's stub in place
+of the native binary) fails loudly instead of at the first claimed issue. A
+box already broken by a failed auto-update is repaired by running it again.
+
+The auto-updater is switched off in the user's `~/.claude/settings.json`
+(`DISABLE_AUTOUPDATER` and `autoUpdates`), and not only in the unit's
+`Environment=`: the update that prompted this (#25) started in an interactive
+`claude login` under `sudo -u <user> -H bash -l`, which never sees the unit's
+environment.
+
+On start the worker runs `claude --version` and refuses to start if it fails.
+It reports the version in the `:crown: awake` message, on the status page and
+as `claudius_claude_info{version,pinned}` on `/metrics`, and warns when it is
+not the version the binary was built with: roll the binary and the CLI out
+together, or expect that warning in between.
 
 Migrating a box that still runs the bash worker: stop the unit, `scp` the binary
 over `worker.sh`, complete the device flow once in the foreground, point

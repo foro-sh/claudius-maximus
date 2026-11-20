@@ -56,3 +56,9 @@ jobs:
       # a typo'd REPOS and an instance pointed at another instance's tree.
       - name: Test add-instance.sh
         run: ./test-add-instance.sh
+
+      # The CLI install is what keeps a failed auto-update from leaving an
+      # instance without a `claude` (#25); its settings merge must never drop
+      # keys somebody else put in the user's settings.json.
+      - name: Test install-claude.sh
+        run: ./test-install-claude.sh

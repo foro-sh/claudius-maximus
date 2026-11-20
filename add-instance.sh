@@ -171,6 +171,13 @@ fi
 binary=${CLAUDIUS_BINARY:-target/release/claudius-maximus}
 [[ -x $binary ]] || die "no binary at $binary, 'cargo build --release' first, or point CLAUDIUS_BINARY at one (every release carries claudius-maximus-linux-x86_64)"
 [[ -f claudius@.service ]] || die "run me from the repo checkout (claudius@.service not found here)"
+# Checked here, before anything is created, because the install below needs it
+# and a half-provisioned user is a worse way to find out.
+[[ -f claude-code.version && -n $(tr -d '[:space:]' < claude-code.version) ]] \
+    || die "claude-code.version is missing or empty, it pins the claude CLI every instance installs"
+[[ -x install-claude.sh ]] || die "run me from the repo checkout (install-claude.sh not found here)"
+command -v npm >/dev/null || die "npm is not installed, install-claude.sh installs the claude CLI from the npm package"
+command -v jq >/dev/null || die "jq is not installed, install-claude.sh edits the user's Claude Code settings with it"
 
 home=/home/$user
 
@@ -263,6 +270,9 @@ fi
 install -d -o "$user" -g "$user" -m 755 "$home/claudius-maximus"
 install -o "$user" -g "$user" -m 755 "$binary" "$home/claudius-maximus/claudius-maximus"
 
+# The pinned claude CLI, with its auto-updater off. The login stays manual.
+./install-claude.sh "$user"
+
 env_file=/etc/$user.env
 if [[ -e $env_file ]]; then
     echo "$env_file already exists, leaving it alone"
@@ -320,7 +330,6 @@ Three things left, none of them automatable:
 
   2. This instance's own subscription login, as the person who holds it:
        sudo -u $user -H bash -l
-         npm install -g @anthropic-ai/claude-code    # or a per-user install
          claude login && claude doctor
          unset ANTHROPIC_API_KEY
 

@@ -31,6 +31,11 @@ WorkingDirectory=/home/%i
 Environment=HOME=/home/%i
 Environment=PATH=/home/%i/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=CLAUDE_CODE_RETRY_WATCHDOG=1
+# The CLI never updates itself: its version is pinned in claude-code.version and
+# installed by install-claude.sh (#25). This is the second layer; the first is
+# the same setting in the user's ~/.claude/settings.json, which is the only one
+# an interactive `claude login` in a login shell ever sees.
+Environment=DISABLE_AUTOUPDATER=1
 # Per-instance config, including which $LABEL this instance owns, its $INSTANCE
 # display name, and the GIT_AUTHOR_*/GIT_COMMITTER_* identity commits are
 # attributed to (that email must be verified on the instance's GitHub account).
