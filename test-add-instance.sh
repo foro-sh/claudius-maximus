@@ -53,6 +53,23 @@ expect "must run as root" \
     "$(REPOS='foro-sh/claudius-maximus=/home/claudius-tertius/repos/claudius-maximus=alice|bob' run claudius-tertius)"
 expect "no binary at" "$(CLAUDIUS_BINARY=/nonexistent run claudius-tertius)"
 
+# The pinned CLI version must exist before anything is created. The checkout
+# stays read-only: the script is run from a copy with the pin file removed or
+# emptied.
+copy=$(mktemp -d)
+trap 'rm -f "$fake_binary"; rm -rf "$copy"' EXIT
+cp add-instance.sh install-claude.sh claudius@.service claude-code.version "$copy/"
+run_in_copy() {
+    (cd "$copy" && env CLAUDIUS_BINARY="$fake_binary" REPOS=foro-sh/claudius-maximus \
+        GITHUB_CLIENT_ID=Iv1.testclientid GIT_AUTHOR_NAME=Someone \
+        GIT_AUTHOR_EMAIL=someone@example.com ./add-instance.sh claudius-tertius 2>&1)
+}
+expect "must run as root" "$(run_in_copy)"
+: > "$copy/claude-code.version"
+expect "claude-code.version is missing or empty" "$(run_in_copy)"
+rm "$copy/claude-code.version"
+expect "claude-code.version is missing or empty" "$(run_in_copy)"
+
 # 100 Latin ordinals in the table (tokens inside the INSTANCE_ORDINALS array).
 ordinals_count=$(sed -n '/^INSTANCE_ORDINALS=(/,/^)/p' add-instance.sh \
     | tr -s '[:space:]' '\n' \
