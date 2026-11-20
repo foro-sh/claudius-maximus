@@ -28,7 +28,7 @@ use crate::claude_cli::{Claude, ClaudeRun, RunObserver, Stream};
 use crate::config::{Config, RepoEntry};
 use crate::limits::{self, Signal};
 use crate::notify::Notifier;
-use crate::status::{Activity, Level, Stage, Status, Tally, human};
+use crate::status::{Activity, ClaudeVersion, Level, Stage, Status, Tally, human};
 
 /// What a sweep decided one issue needs, before any clone is touched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +78,19 @@ pub struct Worker<'a> {
     pub status: &'a Status,
 }
 
+/// What the awake message says about the CLI: nothing before the probe has
+/// answered, the version when it is the pinned one, and both when it is not.
+fn claude_clause(claude: Option<&ClaudeVersion>) -> String {
+    match claude {
+        Some(claude) if claude.is_pinned() => format!(" on claude {}", claude.installed),
+        Some(claude) => format!(
+            " on claude {} (expected {})",
+            claude.installed, claude.pinned
+        ),
+        None => String::new(),
+    }
+}
+
 impl Worker<'_> {
     /// Sweeps forever. Serial and oldest-first: one subscription, so extra
     /// repos are visited in order within the same sweep, never concurrently.
@@ -91,14 +104,7 @@ impl Worker<'_> {
             self.config.implement_model,
             self.config.poll_interval.as_secs(),
         ));
-        let claude = match self.status.snapshot().claude {
-            Some(claude) if claude.is_pinned() => format!(" on claude {}", claude.installed),
-            Some(claude) => format!(
-                " on claude {} (expected {})",
-                claude.installed, claude.pinned
-            ),
-            None => String::new(),
-        };
+        let claude = claude_clause(self.status.snapshot().claude.as_ref());
         self.notifier.post(&format!(
             ":crown: {} is awake{claude}, draining the `{}` backlog in {}.",
             self.config.instance,
@@ -1227,6 +1233,23 @@ fn author_allowed(author: &str, allowlist: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_awake_message_names_the_claude_version_and_flags_a_stray_one() {
+        let version = |installed: &str| ClaudeVersion {
+            installed: installed.to_owned(),
+            pinned: "2.1.329".to_owned(),
+        };
+        assert_eq!(claude_clause(None), "");
+        assert_eq!(
+            claude_clause(Some(&version("2.1.329"))),
+            " on claude 2.1.329"
+        );
+        assert_eq!(
+            claude_clause(Some(&version("2.1.308"))),
+            " on claude 2.1.308 (expected 2.1.329)"
+        );
+    }
     use crate::fakes::{FakeClaude, FakeGit, FakeGithub, FakeIssue};
     use std::path::PathBuf;
     use std::time::Duration;
