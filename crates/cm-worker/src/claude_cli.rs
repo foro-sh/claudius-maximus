@@ -170,13 +170,7 @@ impl ClaudeCli {
             // exit status, which is the one thing known for certain.
             let out = out.unwrap_or_default();
             let err = err.unwrap_or_default();
-            let message = failure_message(&status.to_string(), &out, &err);
-            // A dead login is not this run's fault, so it gets its own error
-            // type for the worker to tell apart. Only on a failed exit.
-            if let Some(said) = auth::classify(&out).or_else(|| auth::classify(&err)) {
-                return Err(anyhow::Error::new(AuthFailure { said, message }));
-            }
-            anyhow::bail!(message);
+            return Err(failure(&status.to_string(), &out, &err));
         }
         // A write that failed against a run that still exited 0 means claude
         // answered a prompt it only half read. The run is not trusted for
@@ -191,6 +185,17 @@ impl ClaudeCli {
         }
 
         Ok(out?.join("\n"))
+    }
+}
+
+/// The error for a run that exited non-zero. A dead login is not this run's
+/// fault, so it gets its own error type for the worker to tell apart; anything
+/// else is an ordinary failure carrying `claude`'s own words.
+fn failure(status: &str, out: &[String], err: &[String]) -> anyhow::Error {
+    let message = failure_message(status, out, err);
+    match auth::classify(out).or_else(|| auth::classify(err)) {
+        Some(said) => anyhow::Error::new(AuthFailure { said, message }),
+        None => anyhow::anyhow!(message),
     }
 }
 
@@ -314,6 +319,34 @@ mod tests {
         assert!(message.contains("line 99"), "{message}");
         assert!(message.contains("line 80"), "{message}");
         assert!(!message.contains("line 79"), "{message}");
+    }
+
+    #[test]
+    fn the_incident_is_an_auth_failure_with_the_reason_in_the_message() {
+        // Exactly what the three homelab instances printed: the reason on
+        // stdout, nothing on stderr.
+        let said = "Failed to authenticate: OAuth session expired and could not be refreshed";
+        let err = failure("exit status: 1", &lines(said), &[]);
+        let auth = err.downcast_ref::<AuthFailure>().expect("an auth failure");
+        assert_eq!(auth.said, said);
+        assert_eq!(
+            auth.message,
+            format!("claude exited with exit status: 1: {said}")
+        );
+
+        // And on stderr, in case a release moves it.
+        let err = failure("exit status: 1", &[], &lines(said));
+        assert!(err.downcast_ref::<AuthFailure>().is_some());
+    }
+
+    #[test]
+    fn an_ordinary_failure_is_not_an_auth_failure() {
+        let err = failure("exit status: 1", &lines("error: could not compile"), &[]);
+        assert!(err.downcast_ref::<AuthFailure>().is_none());
+        assert_eq!(
+            err.to_string(),
+            "claude exited with exit status: 1: error: could not compile"
+        );
     }
 
     #[test]
