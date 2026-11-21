@@ -367,8 +367,8 @@ Claudius Maximus: claude still cannot authenticate: Failed to authenticate: …;
   counted. Each sweep costs one tiny probe run (`claude -p "say ok"`) instead of
   one run per issue.
 
-To clear it, log in as the service user (`sudo -u claudius -i claude`, then
-`/login`). **No restart is needed**: the next sweep's probe passes, the worker
+To clear it, log in as the instance's service user (`sudo -u <instance> -H claude`,
+then `/login`). **No restart is needed**: the next sweep's probe passes, the worker
 says `claude authenticated again after …`, and sweeps in that same pass. A
 probe that fails for any other reason (a spent usage window, a flaky network)
 counts as a working login, and the real runs report it as usual.
