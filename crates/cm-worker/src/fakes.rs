@@ -395,6 +395,8 @@ pub struct FakeClaude {
     /// what an operator running `claude /login` does.
     authenticated: Mutex<bool>,
     probes: Mutex<u64>,
+    /// Makes every probe fail for a reason that is not the login.
+    probe_broken: Mutex<bool>,
 }
 
 impl Default for FakeClaude {
@@ -406,6 +408,7 @@ impl Default for FakeClaude {
             runs: Mutex::new(Vec::new()),
             authenticated: Mutex::new(true),
             probes: Mutex::new(0),
+            probe_broken: Mutex::new(false),
         }
     }
 }
@@ -437,6 +440,12 @@ impl FakeClaude {
     /// The operator logs in again.
     pub fn log_in(&self) {
         *self.authenticated.lock().unwrap() = true;
+    }
+
+    /// From now on a probe fails with something that is not an
+    /// [`AuthFailure`], like a spent usage window or a flaky network would.
+    pub fn break_probe(&self) {
+        *self.probe_broken.lock().unwrap() = true;
     }
 
     /// How many probes the worker ran.
@@ -496,6 +505,9 @@ impl Claude for FakeClaude {
 
     fn probe(&self, _model: &str) -> anyhow::Result<()> {
         *self.probes.lock().unwrap() += 1;
+        if *self.probe_broken.lock().unwrap() {
+            anyhow::bail!("claude exited with exit status: 1: Claude AI usage limit reached");
+        }
         if *self.authenticated.lock().unwrap() {
             Ok(())
         } else {

@@ -2684,6 +2684,70 @@ mod tests {
         assert_eq!(harness.claude.probes(), 0);
     }
 
+    #[tokio::test]
+    async fn a_dead_login_stops_the_sweep_before_the_next_repo() {
+        let harness = Harness::new(
+            config(
+                vec![
+                    repo("foro-sh/foro", "foro", &[]),
+                    repo("foro-sh/other", "other", &[]),
+                ],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
+                FakeIssue::new("foro-sh/other", 3, "danielsteman", &[LABEL]),
+            ],
+            FakeClaude::unauthenticated(),
+        );
+
+        harness.sweep().await;
+
+        assert_eq!(
+            harness.claude.runs().len(),
+            1,
+            "the second repo would fail the same way, so it is not tried"
+        );
+        assert_eq!(
+            harness.github.labels("foro-sh/other", 3),
+            vec![LABEL.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_fails_for_another_reason_counts_as_a_working_login() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::unauthenticated(),
+        );
+        harness.sweep().await;
+        assert!(harness.snapshot().credential != Credential::Ok);
+
+        harness.claude.log_in();
+        harness.claude.break_probe();
+        harness.sweep().await;
+
+        assert_eq!(harness.claude.probes(), 1);
+        assert_eq!(
+            harness.snapshot().credential,
+            Credential::Ok,
+            "a probe that says nothing about the login does not keep it paused"
+        );
+        assert!(
+            harness
+                .github
+                .labels("foro-sh/foro", 7)
+                .contains(&format!("{LABEL}:planned")),
+            "the real run goes ahead and reports its own failures"
+        );
+    }
+
     #[test]
     fn an_auth_failure_is_still_one_after_context_is_added() {
         let err = anyhow::Error::new(AuthFailure {
