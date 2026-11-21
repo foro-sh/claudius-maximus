@@ -22,7 +22,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::status::{Level, Snapshot, Status, Window, human};
+use crate::status::{Credential, Level, Snapshot, Status, Window, human};
 
 /// How long a client gets to send its request line and take its answer. A
 /// browser tab left open must not be able to hold the only serving thread.
@@ -166,7 +166,16 @@ pub fn respond(target: &str, snapshot: &Snapshot) -> Response {
         ),
         "/healthz" => {
             let grace = grace_for(snapshot.poll_interval);
-            if healthy(snapshot, grace) {
+            if let Credential::Dead { for_, said } = &snapshot.credential {
+                // Says why, and says it first: a worker that is moving, with
+                // a run in flight, is still not one that can do any work.
+                Response::new(
+                    503,
+                    "Service Unavailable",
+                    "text/plain; charset=utf-8",
+                    format!("claude cannot authenticate for {}: {said}\n", human(*for_)),
+                )
+            } else if healthy(snapshot, grace) {
                 Response::new(
                     200,
                     "OK",
@@ -216,8 +225,14 @@ pub fn respond(target: &str, snapshot: &Snapshot) -> Response {
 /// reopened, and a worker sweeping on regardless is answered for by its
 /// activity, while one that has stopped should be caught rather than excused
 /// for as long as `claude` said the window would last.
+///
+/// And never while `claude` cannot authenticate, whatever it is doing: every
+/// run fails within a second, so the worker is moving and shipping nothing,
+/// and that is the state a health check exists to surface. Only a human can
+/// clear it, by logging in.
 pub fn healthy(snapshot: &Snapshot, grace: Duration) -> bool {
-    snapshot.activity.stage.runs_claude() || snapshot.activity_for <= grace
+    !snapshot.credential.is_dead()
+        && (snapshot.activity.stage.runs_claude() || snapshot.activity_for <= grace)
 }
 
 /// How long `/healthz` waits for the worker to move before calling it stopped:
@@ -256,6 +271,14 @@ fn json(snapshot: &Snapshot) -> serde_json::Value {
                 "claude_said": said,
             }),
         },
+        "credential": match &snapshot.credential {
+            Credential::Ok => serde_json::json!({ "ok": true }),
+            Credential::Dead { for_, said } => serde_json::json!({
+                "ok": false,
+                "failing_for_seconds": for_.as_secs(),
+                "claude_said": said,
+            }),
+        },
         "counters": {
             "sweeps": counters.sweeps,
             "issues_seen": counters.issues_seen,
@@ -266,6 +289,7 @@ fn json(snapshot: &Snapshot) -> serde_json::Value {
             "issue_failures": counters.issue_failures,
             "repo_failures": counters.repo_failures,
             "windows_shut": counters.windows_shut,
+            "auth_failures": counters.auth_failures,
             "claude_seconds": counters.claude_time.as_secs(),
             "window_seconds": counters.window_time.as_secs(),
         },
@@ -403,6 +427,19 @@ fn metrics(snapshot: &Snapshot) -> String {
         counters.windows_shut.to_string(),
     );
     metric(
+        "claudius_claude_authenticated",
+        "0 while claude cannot authenticate: sweeping is paused until someone \
+         runs `claude /login` as the service user.",
+        "gauge",
+        bit(!snapshot.credential.is_dead()),
+    );
+    metric(
+        "claudius_auth_failures_total",
+        "Times claude was found unable to authenticate, by a run or a probe.",
+        "counter",
+        counters.auth_failures.to_string(),
+    );
+    metric(
         "claudius_usage_window_shut",
         "1 while a spent usage window is being waited out.",
         "gauge",
@@ -511,10 +548,11 @@ fn linkify(escaped: &str) -> String {
 /// into local time by the browser, which is the only participant that knows
 /// what timezone the person reading is in.
 fn page(snapshot: &Snapshot) -> String {
-    let state = match &snapshot.window {
-        Window::Shut { .. } => "waiting",
-        Window::Open if snapshot.activity.stage.runs_claude() => "working",
-        Window::Open => "idle",
+    let state = match (&snapshot.credential, &snapshot.window) {
+        (Credential::Dead { .. }, _) => "unauthenticated",
+        (_, Window::Shut { .. }) => "waiting",
+        (_, Window::Open) if snapshot.activity.stage.runs_claude() => "working",
+        (_, Window::Open) => "idle",
     };
     let counters = &snapshot.counters;
     let mut tiles = String::new();
@@ -550,6 +588,18 @@ fn page(snapshot: &Snapshot) -> String {
             counters.issue_failures, counters.repo_failures
         ),
     );
+
+    let credential = match &snapshot.credential {
+        Credential::Ok => String::new(),
+        Credential::Dead { for_, said } => format!(
+            "<div class=credential><h2>claude cannot authenticate</h2><p>failing for {} \
+             &middot; claude said: {}</p><p class=small>Sweeping is paused and no issue is \
+             being failed for it. Log in as the service user (<code>claude /login</code>): \
+             a probe run resumes sweeping by itself, no restart needed.</p></div>",
+            human(*for_),
+            escape(said)
+        ),
+    };
 
     let window = match &snapshot.window {
         Window::Open => String::new(),
@@ -633,6 +683,7 @@ fn page(snapshot: &Snapshot) -> String {
         .replace("%%STATE%%", state)
         .replace("%%HEADLINE%%", &escape(&snapshot.doing()))
         .replace("%%SUBLINE%%", &escape(&snapshot.line()))
+        .replace("%%CREDENTIAL%%", &credential)
         .replace("%%WINDOW%%", &window)
         .replace("%%TILES%%", &tiles)
         .replace("%%SWEEP%%", &sweep)
@@ -676,8 +727,12 @@ h2 { font-size: .95rem; margin: 0 0 .35rem; text-transform: lowercase; letter-sp
 }
 .now.waiting { border-left-color: #c9762f; }
 .now.idle { border-left-color: #4a443c; }
+.now.unauthenticated { border-left-color: #c2564a; }
 .now b { display: block; font-size: 1.5rem; font-weight: 600; }
 .now p { margin: .3rem 0 0; color: var(--dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem; }
+.credential { margin-top: 1rem; border: 1px solid #6b2c25; background: #2a1411; border-radius: .6rem; padding: 1rem 1.25rem; }
+.credential h2 { color: #e0705f; }
+.credential p { margin: .2rem 0 0; }
 .window { margin-top: 1rem; border: 1px solid #573a1c; background: #241a10; border-radius: .6rem; padding: 1rem 1.25rem; }
 .window h2 { color: #e0a04a; }
 .window p { margin: .2rem 0 0; }
@@ -705,6 +760,7 @@ footer a { color: var(--gold); }
     <b>%%HEADLINE%%</b>
     <p>%%SUBLINE%%</p>
   </div>
+  %%CREDENTIAL%%
   %%WINDOW%%
   %%HEARD%%
 
@@ -809,6 +865,82 @@ mod tests {
         assert_eq!(json["window"]["shut"], false);
         assert_eq!(json["healthy"], true);
         assert_eq!(json["counters"]["pulls_opened"], 0);
+    }
+
+    fn dead_login(said: &str) -> Snapshot {
+        let status = Status::new(&Config::sample());
+        status.doing(Activity::run(Stage::Planning, "foro-sh/foro#7", "opus"));
+        status.credential_dead(said);
+        status.snapshot()
+    }
+
+    #[test]
+    fn a_dead_login_is_unhealthy_even_with_a_run_in_flight_and_fresh_activity() {
+        let snapshot = dead_login("Failed to authenticate: OAuth session expired");
+        assert!(snapshot.activity.stage.runs_claude());
+        assert!(snapshot.activity_for <= Duration::from_secs(1));
+        assert!(!healthy(&snapshot, grace_for(snapshot.poll_interval)));
+
+        let response = respond("/healthz", &snapshot);
+        assert_eq!(response.code, 503);
+        assert!(
+            response
+                .body
+                .starts_with("claude cannot authenticate for 0s: Failed to authenticate"),
+            "{}",
+            response.body
+        );
+    }
+
+    #[test]
+    fn a_dead_login_is_in_every_rendering() {
+        let snapshot = dead_login("Failed to authenticate: OAuth session expired");
+
+        let json: serde_json::Value =
+            serde_json::from_str(&body("/status.json", &snapshot)).unwrap();
+        assert_eq!(json["credential"]["ok"], false);
+        assert_eq!(json["healthy"], false);
+        assert!(json["credential"]["failing_for_seconds"].is_number());
+        assert_eq!(
+            json["credential"]["claude_said"],
+            "Failed to authenticate: OAuth session expired"
+        );
+        assert_eq!(json["counters"]["auth_failures"], 1);
+
+        let metrics = body("/metrics", &snapshot);
+        assert!(
+            metrics.contains(
+                "claudius_claude_authenticated{instance=\"Claudius Maximus\",label=\"claudius-maximus\"} 0"
+            ),
+            "{metrics}"
+        );
+        assert!(
+            metrics.contains("claudius_auth_failures_total{"),
+            "{metrics}"
+        );
+
+        let page = body("/", &snapshot);
+        assert!(page.contains("class=\"now unauthenticated\""), "{page}");
+        assert!(page.contains("claude cannot authenticate"), "{page}");
+        assert!(page.contains("OAuth session expired"), "{page}");
+    }
+
+    #[test]
+    fn a_working_login_says_so() {
+        let snapshot = working();
+        let json: serde_json::Value =
+            serde_json::from_str(&body("/status.json", &snapshot)).unwrap();
+        assert_eq!(json["credential"]["ok"], true);
+        assert!(body("/metrics", &snapshot).contains("claudius_claude_authenticated{"));
+        assert!(!body("/", &snapshot).contains("<div class=credential>"));
+    }
+
+    #[test]
+    fn what_claude_said_cannot_inject_html_into_the_page() {
+        let snapshot = dead_login("<script>alert(1)</script> Failed to authenticate");
+        let page = body("/", &snapshot);
+        assert!(!page.contains("<script>alert(1)"), "{page}");
+        assert!(page.contains("&lt;script&gt;alert(1)"), "{page}");
     }
 
     #[test]

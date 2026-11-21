@@ -162,6 +162,12 @@ pub enum Credential {
     },
 }
 
+impl Credential {
+    pub fn is_dead(&self) -> bool {
+        matches!(self, Credential::Dead { .. })
+    }
+}
+
 /// Everything counted since the worker rose.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counters {
@@ -274,6 +280,16 @@ impl Snapshot {
     /// at a glance in `systemctl status`, so the subject comes first and the
     /// elapsed time comes with it: "implementing foro-sh/foro#7 for 12m".
     pub fn line(&self) -> String {
+        // First, ahead of the window and of whatever the worker last did: a
+        // login that cannot work is the one thing that makes everything else
+        // on this line moot.
+        if let Credential::Dead { for_, said } = &self.credential {
+            return format!(
+                "claude cannot authenticate for {}: {said} (sweeping paused, was {})",
+                human(*for_),
+                self.doing()
+            );
+        }
         if let Window::Shut {
             for_,
             resets_at,
@@ -693,6 +709,18 @@ mod tests {
         assert!(
             status.credential_dead("dead again"),
             "a new death is news again"
+        );
+    }
+
+    #[test]
+    fn the_line_leads_with_a_dead_credential_ahead_of_a_shut_window() {
+        let status = Status::new(&Config::sample());
+        status.window_shut(&Spent::default());
+        status.credential_dead("Failed to authenticate");
+        let line = status.snapshot().line();
+        assert!(
+            line.starts_with("claude cannot authenticate for 0s: Failed to authenticate"),
+            "{line}"
         );
     }
 
