@@ -1,3 +1,4 @@
+mod auth;
 mod backoff;
 mod claim;
 mod claude_cli;

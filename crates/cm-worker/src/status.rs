@@ -48,6 +48,9 @@ pub enum Stage {
     Shipping,
     /// Between sweeps.
     Resting,
+    /// Sweeping is paused: `claude` cannot authenticate, and the only thing
+    /// the worker does is probe for a login that works again.
+    Unauthenticated,
 }
 
 impl Stage {
@@ -72,13 +75,14 @@ impl Stage {
             Stage::Reviewing => "reviewing",
             Stage::Shipping => "shipping",
             Stage::Resting => "resting",
+            Stage::Unauthenticated => "unauthenticated",
         }
     }
 }
 
 /// Every stage there is, for the renderers that want one series per stage
 /// rather than one value naming the current one.
-pub const STAGES: [Stage; 8] = [
+pub const STAGES: [Stage; 9] = [
     Stage::Rising,
     Stage::Authorizing,
     Stage::Sweeping,
@@ -87,6 +91,7 @@ pub const STAGES: [Stage; 8] = [
     Stage::Reviewing,
     Stage::Shipping,
     Stage::Resting,
+    Stage::Unauthenticated,
 ];
 
 /// A stage, and what it is being done to.
@@ -144,6 +149,25 @@ impl Window {
     }
 }
 
+/// Whether `claude` can log in. A dead login is a fault of the whole box, not
+/// of the issue that happened to be in front of it, so it has a state of its
+/// own beside the usage window rather than being one more failed run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+    Ok,
+    Dead {
+        for_: Duration,
+        /// The line `claude` printed, clipped.
+        said: String,
+    },
+}
+
+impl Credential {
+    pub fn is_dead(&self) -> bool {
+        matches!(self, Credential::Dead { .. })
+    }
+}
+
 /// Everything counted since the worker rose.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counters {
@@ -156,6 +180,9 @@ pub struct Counters {
     pub issue_failures: u64,
     pub repo_failures: u64,
     pub windows_shut: u64,
+    /// Times `claude` was found unable to authenticate, by a run or by a
+    /// probe: a rate here is a login that stays dead.
+    pub auth_failures: u64,
     /// Wall time inside a `claude` process, which on a healthy instance is
     /// most of the wall time there is.
     pub claude_time: Duration,
@@ -237,6 +264,7 @@ pub struct Snapshot {
     /// How long the current activity has lasted.
     pub activity_for: Duration,
     pub window: Window,
+    pub credential: Credential,
     /// How long since `claude` last wrote a line, while a run is in flight.
     /// This is the number that separates a run that is working from a run that
     /// is waiting.
@@ -252,6 +280,16 @@ impl Snapshot {
     /// at a glance in `systemctl status`, so the subject comes first and the
     /// elapsed time comes with it: "implementing foro-sh/foro#7 for 12m".
     pub fn line(&self) -> String {
+        // First, ahead of the window and of whatever the worker last did: a
+        // login that cannot work is the one thing that makes everything else
+        // on this line moot.
+        if let Credential::Dead { for_, said } = &self.credential {
+            return format!(
+                "claude cannot authenticate for {}: {said} (sweeping paused, was {})",
+                human(*for_),
+                self.doing()
+            );
+        }
         if let Window::Shut {
             for_,
             resets_at,
@@ -312,6 +350,7 @@ struct Inner {
     activity: Activity,
     activity_since: Instant,
     window: Shutter,
+    credential: Login,
     counters: Counters,
     last_line: Option<String>,
     last_line_at: Option<Instant>,
@@ -335,6 +374,12 @@ enum Shutter {
     },
 }
 
+/// The live half of [`Credential`].
+enum Login {
+    Ok,
+    Dead { since: Instant, said: String },
+}
+
 impl Status {
     pub fn new(config: &Config) -> Self {
         Status {
@@ -348,6 +393,7 @@ impl Status {
                 activity: Activity::bare(Stage::Rising),
                 activity_since: Instant::now(),
                 window: Shutter::Open,
+                credential: Login::Ok,
                 counters: Counters::default(),
                 last_line: None,
                 last_line_at: None,
@@ -467,6 +513,41 @@ impl Status {
         Some(shut_for)
     }
 
+    /// `claude` cannot authenticate. Idempotent for the state, like
+    /// [`Status::window_shut`]: the clock is on how long the login has been
+    /// dead, not on the latest complaint. Every sighting is counted.
+    ///
+    /// Returns true the first time, so the caller's journal line, event and
+    /// chat message happen once.
+    pub fn credential_dead(&self, said: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        inner.counters.auth_failures += 1;
+        if let Login::Dead { said: old, .. } = &mut inner.credential {
+            *old = clip(said, LINE_MAX);
+            return false;
+        }
+        inner.credential = Login::Dead {
+            since: Instant::now(),
+            said: clip(said, LINE_MAX),
+        };
+        true
+    }
+
+    /// `claude` can authenticate. Returns how long it could not, or `None` if
+    /// it always could.
+    pub fn credential_ok(&self) -> Option<Duration> {
+        let mut inner = self.inner.lock().unwrap();
+        let Login::Dead { since, .. } = inner.credential else {
+            return None;
+        };
+        inner.credential = Login::Ok;
+        Some(since.elapsed())
+    }
+
+    pub fn is_credential_dead(&self) -> bool {
+        matches!(self.inner.lock().unwrap().credential, Login::Dead { .. })
+    }
+
     /// One finished `claude` run, however it went.
     pub fn ran_claude(&self, took: Duration, ok: bool) {
         let mut inner = self.inner.lock().unwrap();
@@ -523,6 +604,13 @@ impl Status {
                 } => Window::Shut {
                     for_: since.elapsed(),
                     resets_at: *resets_at,
+                    said: said.clone(),
+                },
+            },
+            credential: match &inner.credential {
+                Login::Ok => Credential::Ok,
+                Login::Dead { since, said } => Credential::Dead {
+                    for_: since.elapsed(),
                     said: said.clone(),
                 },
             },
@@ -594,6 +682,46 @@ mod tests {
         assert_eq!(snapshot.counters, Counters::default());
         assert_eq!(snapshot.window, Window::Open);
         assert_eq!(snapshot.quiet_for, None, "no run, no silence to measure");
+    }
+
+    #[test]
+    fn a_dead_credential_is_said_once_and_clears_with_how_long_it_lasted() {
+        let status = Status::new(&Config::sample());
+        assert_eq!(status.snapshot().credential, Credential::Ok);
+        assert_eq!(status.credential_ok(), None, "nothing to be back from");
+
+        assert!(
+            status.credential_dead("Failed to authenticate"),
+            "first time"
+        );
+        assert!(!status.credential_dead("Failed to authenticate again"));
+        assert!(status.is_credential_dead());
+        let snapshot = status.snapshot();
+        assert!(
+            matches!(&snapshot.credential, Credential::Dead { said, .. } if said.ends_with("again")),
+            "{:?}",
+            snapshot.credential
+        );
+        assert_eq!(snapshot.counters.auth_failures, 2, "every sighting counts");
+
+        assert!(status.credential_ok().is_some());
+        assert!(!status.is_credential_dead());
+        assert!(
+            status.credential_dead("dead again"),
+            "a new death is news again"
+        );
+    }
+
+    #[test]
+    fn the_line_leads_with_a_dead_credential_ahead_of_a_shut_window() {
+        let status = Status::new(&Config::sample());
+        status.window_shut(&Spent::default());
+        status.credential_dead("Failed to authenticate");
+        let line = status.snapshot().line();
+        assert!(
+            line.starts_with("claude cannot authenticate for 0s: Failed to authenticate"),
+            "{line}"
+        );
     }
 
     #[test]

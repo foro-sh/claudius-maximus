@@ -269,16 +269,17 @@ a run gone quiet carries on until `STALL_AFTER=0` turns that off too.
 | `/`            | Current stage, a spent window with a countdown, counters, the last line `claude` wrote, and the chronicle of what has happened           |
 | `/status.json` | The same thing for scripts                                                                                                              |
 | `/metrics`     | Prometheus                                                                                                                              |
-| `/healthz`     | `200` while the worker is still moving, `503` when it has stopped                                                                        |
+| `/healthz`     | `200` while the worker is still moving, `503` when it has stopped or `claude` cannot authenticate                                        |
 
 ```bash
-$ curl -s localhost:9781/status.json | jq '{line, window, counters}'
+$ curl -s localhost:9781/status.json | jq '{line, window, credential, counters}'
 {
   "line": "waiting out a spent usage window for 20m00s, reopens in 52m00s (was implementing foro-sh/foro#12 (claude-sonnet-5))",
   "window": { "shut": true, "shut_for_seconds": 1200, "resets_at_epoch": 1763481600, "claude_said": null },
+  "credential": { "ok": true },
   "counters": { "sweeps": 41, "issues_seen": 96, "plans_posted": 9, "pulls_opened": 8,
                 "claude_runs": 17, "claude_failures": 1, "issue_failures": 1, "repo_failures": 0,
-                "windows_shut": 2, "claude_seconds": 38211, "window_seconds": 9160 }
+                "windows_shut": 2, "auth_failures": 0, "claude_seconds": 38211, "window_seconds": 9160 }
 }
 ```
 
@@ -343,6 +344,41 @@ out and resumes, and nothing here interferes. A run that comes back with an
 answer is treated as proof the window is open again, whatever was recognised on
 the way; a run that *failed* is not, since giving up on a spent window is the
 likeliest way for one to fail.
+
+### Expired credentials
+
+`claude` logs in with an OAuth session that eventually expires and cannot always
+refresh itself. From then on every run exits 1 within a second, and the worker
+treats that as a fault of the whole box rather than of the issue in front of it:
+
+```
+Claudius Maximus: foro-sh/foro#12: planning run failed after 1s
+Claudius Maximus: claude cannot authenticate: Failed to authenticate: OAuth session expired and could not be refreshed; sweeping paused until a probe run succeeds
+Claudius Maximus: foro-sh/foro#12: claude cannot authenticate, leaving it in the queue: claude cannot authenticate (claude exited with exit status: 1: Failed to authenticate: …)
+Claudius Maximus: claude still cannot authenticate: Failed to authenticate: …; probing again in 960s
+```
+
+- `/healthz` returns `503` (`claude cannot authenticate for 1d02h: …`) even though
+  the service is `active`, the page shows a red banner, `/status.json` has
+  `"credential": { "ok": false, … }`, and `claudius_claude_authenticated` is `0`.
+  Alert on that gauge.
+- Mattermost gets one `:rotating_light:` message, not one per issue.
+- No issue is failed for it: no per-issue message, no backoff, no failure
+  counted. Each sweep costs one tiny probe run (`claude -p "say ok"`) instead of
+  one run per issue.
+
+To clear it, log in as the instance's service user (`sudo -u <instance> -H claude`,
+then `/login`). **No restart is needed**: the next sweep's probe passes, the worker
+says `claude authenticated again after …`, and sweeps in that same pass. A
+probe that fails for any other reason (a spent usage window, a flaky network)
+counts as a working login, and the real runs report it as usual.
+
+Recognising it is best-effort, like the usage window: a non-zero exit whose last
+few lines say `failed to authenticate`, `oauth session expired`, `could not be
+refreshed`, `invalid api key` or `please run /login`. A release that rewords the
+message makes the worker quieter, never wrong: the failure falls back to an
+ordinary per-issue one, and the journal now carries the reason either way
+(`claude`'s stdout when stderr is empty, where it prints this one).
 
 ## Adding an instance
 

@@ -23,6 +23,7 @@ use anyhow::Context;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue, PullRequest};
 
+use crate::auth::AuthFailure;
 use crate::backoff::Backoff;
 use crate::claude_cli::{Claude, ClaudeRun, RunObserver, Stream};
 use crate::config::{Config, RepoEntry};
@@ -48,12 +49,19 @@ enum Outcome {
     /// so the issue is back in front of the planning step.
     Nothing,
     Failed,
+    /// `claude` cannot authenticate. Not the issue's failure, so it is not
+    /// counted, backed off or announced against it: it goes back to the queue.
+    Paused,
 }
 
 /// Names the usage window for [`Notifier::post_once`]. One key for the whole
 /// instance, because one subscription is one window: every issue in the
 /// backlog is waiting on the same reset, and hearing that once is the point.
 const WINDOW_KEY: &str = "usage window";
+
+/// Names a dead `claude` login for [`Notifier::post_once`]. One key for the
+/// instance: one box has one login, and every issue fails on it together.
+const AUTH_KEY: &str = "claude login";
 
 /// Names the warning that the window is nearly spent.
 const WINDOW_NEARLY_KEY: &str = "usage window nearly spent";
@@ -106,7 +114,7 @@ impl Worker<'_> {
         );
         loop {
             self.sweep().await;
-            self.status.doing(Activity::bare(Stage::Resting));
+            self.status.doing(Activity::bare(self.resting_stage()));
             tokio::time::sleep(self.config.poll_interval).await;
         }
     }
@@ -114,10 +122,22 @@ impl Worker<'_> {
     /// One pass over every configured repo, draining each one's backlog before
     /// moving on.
     pub async fn sweep(&self) {
+        // A dead login is found out by a probe, not by spending a run on the
+        // first issue in line: nothing in the backlog can be done until it
+        // works, and nothing in memory has to be cleared by hand when it does.
+        if !self.credential_works() {
+            self.status.doing(Activity::bare(Stage::Unauthenticated));
+            return;
+        }
         let started = Instant::now();
         let mut tally = Tally::default();
         self.forget_an_expired_window();
         for repo in &self.config.repos {
+            // The login died during this sweep: the rest of the repos would
+            // each cost a run to find that out again.
+            if self.status.is_credential_dead() {
+                break;
+            }
             self.status
                 .doing(Activity::on(Stage::Sweeping, repo.repo.clone()));
             if let Err(err) = self.sweep_repo(repo, &mut tally).await {
@@ -145,6 +165,85 @@ impl Worker<'_> {
         let took = started.elapsed();
         self.log(&tally.line(took));
         self.status.swept(tally, took);
+    }
+
+    /// What the worker is doing between sweeps.
+    fn resting_stage(&self) -> Stage {
+        if self.status.is_credential_dead() {
+            Stage::Unauthenticated
+        } else {
+            Stage::Resting
+        }
+    }
+
+    /// Whether a sweep can go ahead. With a dead login this runs the probe,
+    /// and resumes the moment it passes: no backoff was recorded against any
+    /// issue, so nothing is waiting out a timer.
+    ///
+    /// Only an auth failure from the probe keeps the worker paused. Anything
+    /// else (a spent usage window, a flaky network) says nothing about the
+    /// login, and is left for the real runs to report in the usual way.
+    fn credential_works(&self) -> bool {
+        if !self.status.is_credential_dead() {
+            return true;
+        }
+        self.status.doing(Activity::bare(Stage::Unauthenticated));
+        match self.claude.probe(&self.config.plan_model) {
+            Ok(()) => {}
+            Err(err) => match err.downcast_ref::<AuthFailure>() {
+                Some(auth) => {
+                    self.status.credential_dead(&auth.said);
+                    self.log(&format!(
+                        "claude still cannot authenticate: {}; probing again in {}s",
+                        auth.said,
+                        self.config.poll_interval.as_secs()
+                    ));
+                    return false;
+                }
+                None => self.log(&format!(
+                    "login probe failed for another reason, treating the login as working: \
+                     {err:#}"
+                )),
+            },
+        }
+        if let Some(down) = self.status.credential_ok() {
+            let down = human(down);
+            self.log(&format!(
+                "claude authenticated again after {down}, sweeping"
+            ));
+            self.status.note(
+                Level::Good,
+                format!("claude authenticated again after {down}"),
+            );
+            self.notifier.forget(AUTH_KEY);
+            self.notifier.post(&format!(
+                ":white_check_mark: {} authenticated with claude again after {down}, sweeping.",
+                self.config.instance
+            ));
+        }
+        true
+    }
+
+    /// `claude` could not authenticate. A fault of the whole box, said once.
+    fn credential_failed(&self, said: &str) {
+        if self.status.credential_dead(said) {
+            self.log(&format!(
+                "claude cannot authenticate: {said}; sweeping paused until a probe run succeeds"
+            ));
+            self.status
+                .note(Level::Bad, format!("claude cannot authenticate: {said}"));
+        }
+        // Offered on every sighting, like the window's: `post_once` is what
+        // makes it once, and it only remembers a line Mattermost took.
+        self.notifier.post_once(
+            AUTH_KEY,
+            &format!(
+                ":rotating_light: {} cannot authenticate with claude ({said}). Sweeping is \
+                 paused: log in as the service user (`claude /login`). No restart is needed, a \
+                 probe run resumes it.",
+                self.config.instance
+            ),
+        );
     }
 
     /// Clears a window that cannot still be shut.
@@ -178,6 +277,9 @@ impl Worker<'_> {
             .await?;
         tally.seen += issues.len() as u64;
         for issue in issues {
+            if self.status.is_credential_dead() {
+                return Ok(());
+            }
             // Per issue rather than per repo. Weighing one costs two GitHub
             // calls and may cost a clone sync, so a backlog of a few hundred
             // keeps the worker in here for minutes at a time: a register that
@@ -220,8 +322,7 @@ impl Worker<'_> {
                     continue;
                 }
                 Err(err) => {
-                    tally.failed += 1;
-                    self.report_issue_failure(repo, issue.number, &err);
+                    self.report_issue_failure(repo, issue.number, &err, tally);
                     continue;
                 }
             };
@@ -246,16 +347,19 @@ impl Worker<'_> {
                 Ok(Outcome::Shipped) => tally.shipped += 1,
                 Ok(Outcome::Nothing) => tally.skipped += 1,
                 Ok(Outcome::Failed) => tally.failed += 1,
+                Ok(Outcome::Paused) => {}
                 Err(err) => {
                     // Everything that fails inside `implement_issue` is
                     // reported there; what reaches here is a failure to plan,
                     // or to read the issue's own state. Both re-run every
                     // sweep, so neither should be visible only to whoever
                     // tails the journal.
-                    tally.failed += 1;
-                    self.report_issue_failure(repo, issue.number, &err);
+                    self.report_issue_failure(repo, issue.number, &err, tally);
                 }
             }
+        }
+        if self.status.is_credential_dead() {
+            return Ok(());
         }
         self.review_tagged_pulls(repo, tally).await?;
         // The repo evidently answers and its clone syncs, so an earlier
@@ -268,7 +372,24 @@ impl Worker<'_> {
 
     /// Everything that fails around one issue is said once per issue, and said
     /// again after the next success there.
-    fn report_issue_failure(&self, repo: &RepoEntry, number: u64, err: &anyhow::Error) {
+    ///
+    /// Counted in `tally` here, so that a failure that is not the issue's is
+    /// not counted at all.
+    fn report_issue_failure(
+        &self,
+        repo: &RepoEntry,
+        number: u64,
+        err: &anyhow::Error,
+        tally: &mut Tally,
+    ) {
+        if claude_unavailable(err) {
+            self.log(&format!(
+                "{}#{number}: claude cannot authenticate, leaving it in the queue: {err:#}",
+                repo.repo
+            ));
+            return;
+        }
+        tally.failed += 1;
         self.status.issue_failed();
         self.status.note(
             Level::Bad,
@@ -464,6 +585,13 @@ or run git. Output the plan text only.
                 ));
                 Outcome::Shipped
             }
+            Err(err) if claude_unavailable(&err) => {
+                self.log(&format!(
+                    "{}#{number}: claude cannot authenticate, leaving it in the queue: {err:#}",
+                    repo.repo
+                ));
+                Outcome::Paused
+            }
             Err(err) => {
                 self.status.issue_failed();
                 self.status.note(
@@ -613,6 +741,9 @@ worker's job, and the box has no credentials for you to do it with.
     async fn review_tagged_pulls(&self, repo: &RepoEntry, tally: &mut Tally) -> anyhow::Result<()> {
         let label = self.review_label();
         for pull in self.github.list_labeled_pulls(&repo.repo, &label).await? {
+            if self.status.is_credential_dead() {
+                return Ok(());
+            }
             let number = pull.number;
             self.status.doing(Activity::on(
                 Stage::Sweeping,
@@ -650,10 +781,7 @@ worker's job, and the box has no credentials for you to do it with.
                     self.notifier
                         .post(&format!(":mag: reviewed {}#{number}: {url}", repo.repo));
                 }
-                Err(err) => {
-                    tally.failed += 1;
-                    self.report_issue_failure(repo, number, &err);
-                }
+                Err(err) => self.report_issue_failure(repo, number, &err, tally),
             }
         }
         Ok(())
@@ -798,6 +926,11 @@ worker's job, and the box has no credentials for you to do it with.
             .doing(Activity::on(Stage::Sweeping, subject.clone()));
 
         self.status.ran_claude(took, result.is_ok());
+        if let Err(err) = &result
+            && let Some(auth) = err.downcast_ref::<AuthFailure>()
+        {
+            self.credential_failed(&auth.said);
+        }
         // An answer is proof the window is open, whatever was or was not
         // recognised in the run's output while it waited. A *failed* run
         // proves nothing: the likeliest way for one to fail on a spent window
@@ -1049,6 +1182,15 @@ fn reset_phrase(spent: &limits::Spent) -> String {
     }
 }
 
+/// Is this failure `claude`'s login rather than the issue's? Those are not the
+/// issue's to answer for: no backoff, no per-issue notice, no failure counted.
+///
+/// A downcast, so it only holds while nothing between `ClaudeCli::run` and the
+/// failure paths flattens the error into a string. `.context` keeps it.
+fn claude_unavailable(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<AuthFailure>().is_some()
+}
+
 /// Names one run for [`Notifier::post_once`], for the heartbeat's "this run
 /// has said nothing for half an hour" line. Keyed on the issue, so the next
 /// run on the same issue can be quiet all over again and be heard.
@@ -1220,6 +1362,7 @@ fn author_allowed(author: &str, allowlist: &[String]) -> bool {
 mod tests {
     use super::*;
     use crate::fakes::{FakeClaude, FakeGit, FakeGithub, FakeIssue};
+    use crate::status::Credential;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -2369,6 +2512,251 @@ mod tests {
             vec![LABEL.to_string()],
             "the trigger label stays on, so the issue comes back when the backoff is up"
         );
+    }
+
+    #[tokio::test]
+    async fn a_dead_login_costs_one_run_and_no_issue_pays_for_it() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
+                FakeIssue::new("foro-sh/foro", 9, "danielsteman", &[LABEL]),
+            ],
+            FakeClaude::unauthenticated(),
+        );
+
+        harness.sweep().await;
+
+        assert_eq!(
+            harness.claude.runs().len(),
+            1,
+            "the second issue would fail the same way, so it is not tried"
+        );
+        for number in [7, 9] {
+            assert!(
+                !harness
+                    .backoff
+                    .resting(&issue_failure_key("foro-sh/foro", number)),
+                "#{number}: the login is at fault, not the issue, so there is nothing to wait out"
+            );
+            assert_eq!(
+                harness.github.labels("foro-sh/foro", number),
+                vec![LABEL.to_string()],
+                "#{number} stays in the queue"
+            );
+        }
+        let snapshot = harness.snapshot();
+        assert!(
+            matches!(snapshot.credential, Credential::Dead { ref said, .. } if said.contains("OAuth session expired")),
+            "{:?}",
+            snapshot.credential
+        );
+        assert_eq!(snapshot.counters.issue_failures, 0);
+        assert_eq!(snapshot.last_sweep.unwrap().tally.failed, 0);
+        assert!(
+            harness
+                .events()
+                .iter()
+                .any(|e| e.contains("claude cannot authenticate")),
+            "{:?}",
+            harness.events()
+        );
+        assert!(
+            !harness
+                .events()
+                .iter()
+                .any(|e| e.contains("could not be processed")),
+            "no per-issue failure is reported: {:?}",
+            harness.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_login_pauses_sweeping_until_a_probe_passes() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
+                FakeIssue::new("foro-sh/foro", 9, "danielsteman", &[LABEL]),
+            ],
+            FakeClaude::unauthenticated(),
+        );
+        harness.sweep().await;
+
+        harness.sweep().await;
+        assert_eq!(harness.claude.runs().len(), 1, "paused: no issue is run");
+        assert_eq!(harness.claude.probes(), 1);
+        assert_eq!(harness.snapshot().activity.stage, Stage::Unauthenticated);
+        assert!(harness.snapshot().credential != Credential::Ok);
+
+        // The operator runs `claude /login`. No restart, and no backoff to
+        // wait out: the very next sweep gets on with it.
+        harness.claude.log_in();
+        harness.sweep().await;
+
+        assert_eq!(harness.claude.probes(), 2);
+        assert_eq!(harness.snapshot().credential, Credential::Ok);
+        assert_eq!(
+            harness.claude.runs().len(),
+            3,
+            "both issues were planned in the sweep that found the login back"
+        );
+        for number in [7, 9] {
+            assert!(
+                harness
+                    .github
+                    .labels("foro-sh/foro", number)
+                    .contains(&format!("{LABEL}:planned")),
+                "#{number}"
+            );
+        }
+        assert!(
+            harness
+                .events()
+                .iter()
+                .any(|e| e.contains("claude authenticated again")),
+            "{:?}",
+            harness.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_login_during_an_implement_run_leaves_the_issue_planned() {
+        let planned = format!("{LABEL}:planned");
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL, &planned])
+                    .with_comment(&plan_comment("Claudius Maximus", LABEL)),
+            ],
+            FakeClaude::unauthenticated(),
+        );
+
+        harness.sweep().await;
+
+        assert!(
+            !harness
+                .backoff
+                .resting(&issue_failure_key("foro-sh/foro", 7))
+        );
+        assert_eq!(harness.snapshot().counters.issue_failures, 0);
+        assert_eq!(harness.snapshot().last_sweep.unwrap().tally.failed, 0);
+        assert!(harness.snapshot().credential != Credential::Ok);
+        assert_eq!(
+            harness.github.labels("foro-sh/foro", 7),
+            vec![LABEL.to_string(), planned]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_failure_still_backs_the_issue_off() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::failing_for(&["foro"]),
+        );
+
+        harness.sweep().await;
+
+        assert!(
+            harness
+                .backoff
+                .resting(&issue_failure_key("foro-sh/foro", 7))
+        );
+        assert_eq!(harness.snapshot().credential, Credential::Ok);
+        assert_eq!(harness.snapshot().counters.issue_failures, 1);
+        assert_eq!(harness.claude.probes(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_dead_login_stops_the_sweep_before_the_next_repo() {
+        let harness = Harness::new(
+            config(
+                vec![
+                    repo("foro-sh/foro", "foro", &[]),
+                    repo("foro-sh/other", "other", &[]),
+                ],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![
+                FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL]),
+                FakeIssue::new("foro-sh/other", 3, "danielsteman", &[LABEL]),
+            ],
+            FakeClaude::unauthenticated(),
+        );
+
+        harness.sweep().await;
+
+        assert_eq!(
+            harness.claude.runs().len(),
+            1,
+            "the second repo would fail the same way, so it is not tried"
+        );
+        assert_eq!(
+            harness.github.labels("foro-sh/other", 3),
+            vec![LABEL.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_that_fails_for_another_reason_counts_as_a_working_login() {
+        let harness = Harness::new(
+            config(
+                vec![repo("foro-sh/foro", "foro", &[])],
+                LABEL,
+                "Claudius Maximus",
+            ),
+            vec![FakeIssue::new("foro-sh/foro", 7, "danielsteman", &[LABEL])],
+            FakeClaude::unauthenticated(),
+        );
+        harness.sweep().await;
+        assert!(harness.snapshot().credential != Credential::Ok);
+
+        harness.claude.log_in();
+        harness.claude.break_probe();
+        harness.sweep().await;
+
+        assert_eq!(harness.claude.probes(), 1);
+        assert_eq!(
+            harness.snapshot().credential,
+            Credential::Ok,
+            "a probe that says nothing about the login does not keep it paused"
+        );
+        assert!(
+            harness
+                .github
+                .labels("foro-sh/foro", 7)
+                .contains(&format!("{LABEL}:planned")),
+            "the real run goes ahead and reports its own failures"
+        );
+    }
+
+    #[test]
+    fn an_auth_failure_is_still_one_after_context_is_added() {
+        let err = anyhow::Error::new(AuthFailure {
+            said: "Failed to authenticate".to_string(),
+            message: "claude exited".to_string(),
+        })
+        .context("planning foro-sh/foro#7");
+        assert!(claude_unavailable(&err));
+        assert!(!claude_unavailable(&anyhow::anyhow!("claude exited")));
     }
 
     #[tokio::test]

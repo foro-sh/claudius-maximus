@@ -9,6 +9,7 @@
 //! about. So both pipes are drained line by line and every line is handed to a
 //! [`RunObserver`] as it arrives.
 
+use crate::auth::{self, AuthFailure};
 use anyhow::Context;
 use std::collections::VecDeque;
 use std::io::{BufReader, Read, Write};
@@ -48,6 +49,11 @@ pub trait RunObserver: Sync {
 /// fake instead of spending quota (`fakes::FakeClaude`).
 pub trait Claude: Send + Sync {
     fn run(&self, run: ClaudeRun<'_>) -> anyhow::Result<String>;
+
+    /// The cheapest run there is, to find out whether the login works. Fails
+    /// with an [`AuthFailure`] when it does not. Any other failure is not a
+    /// verdict on the login, and callers treat it as one that works.
+    fn probe(&self, model: &str) -> anyhow::Result<()>;
 }
 
 /// How much stderr is kept for the error message on a failed run. A run that
@@ -56,15 +62,54 @@ pub trait Claude: Send + Sync {
 /// what the error needs is the end, which is where the reason is.
 const STDERR_LINES_KEPT: usize = 200;
 
+/// How much of stdout goes into the error when stderr had nothing to say.
+const STDOUT_TAIL_LINES: usize = 20;
+
 /// The real thing: `claude -p` on `$PATH`.
 pub struct ClaudeCli;
 
+/// A [`RunObserver`] that listens to nothing, for a run nobody watches.
+struct Unwatched;
+
+impl RunObserver for Unwatched {
+    fn line(&self, _: Stream, _: &str) {}
+}
+
 impl Claude for ClaudeCli {
     fn run(&self, run: ClaudeRun<'_>) -> anyhow::Result<String> {
+        self.spawn(run, &[])
+    }
+
+    fn probe(&self, model: &str) -> anyhow::Result<()> {
+        // Somewhere that is not a clone: the probe has nothing to do with any
+        // repo, and `claude` writes session state into the directory it runs
+        // in.
+        let dir = std::env::temp_dir();
+        self.spawn(
+            ClaudeRun {
+                repo_dir: &dir,
+                model,
+                effort: "low",
+                prompt: "say ok",
+                observer: &Unwatched,
+            },
+            // A spent usage window must not park the probe for hours: a probe
+            // that fails for any reason but the login is good enough.
+            &["CLAUDE_CODE_RETRY_WATCHDOG"],
+        )
+        .map(drop)
+    }
+}
+
+impl ClaudeCli {
+    /// Runs `claude -p` with the variables in `unset` removed from its
+    /// environment, on top of the ones that are always removed.
+    fn spawn(&self, run: ClaudeRun<'_>, unset: &[&str]) -> anyhow::Result<String> {
         // The prompt goes in on stdin, not as an argument: it carries the
         // issue body and the plan, and Linux caps a single argv entry at
         // 128KiB, and a long pasted log in an issue would be `E2BIG` forever.
-        let mut child = Command::new("claude")
+        let mut command = Command::new("claude");
+        command
             .arg("-p")
             .arg("--model")
             .arg(run.model)
@@ -81,8 +126,11 @@ impl Claude for ClaudeCli {
             .current_dir(run.repo_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        for var in unset {
+            command.env_remove(var);
+        }
+        let mut child = command.spawn()?;
 
         // Three threads, one per pipe: `claude` can fill a pipe buffer on
         // either output stream before it has read the whole prompt, so a
@@ -118,10 +166,11 @@ impl Claude for ClaudeCli {
         // breaks the pipe, and its status and stderr say why far better than
         // "broken pipe" does.
         if !status.success() {
-            anyhow::bail!(
-                "claude exited with {status}: {}",
-                err.unwrap_or_default().join("\n")
-            );
+            // `unwrap_or_default`: a read error on a pipe must not hide the
+            // exit status, which is the one thing known for certain.
+            let out = out.unwrap_or_default();
+            let err = err.unwrap_or_default();
+            return Err(failure(&status.to_string(), &out, &err));
         }
         // A write that failed against a run that still exited 0 means claude
         // answered a prompt it only half read. The run is not trusted for
@@ -136,6 +185,39 @@ impl Claude for ClaudeCli {
         }
 
         Ok(out?.join("\n"))
+    }
+}
+
+/// The error for a run that exited non-zero. A dead login is not this run's
+/// fault, so it gets its own error type for the worker to tell apart; anything
+/// else is an ordinary failure carrying `claude`'s own words.
+fn failure(status: &str, out: &[String], err: &[String]) -> anyhow::Error {
+    let message = failure_message(status, out, err);
+    match auth::classify(out).or_else(|| auth::classify(err)) {
+        Some(said) => anyhow::Error::new(AuthFailure { said, message }),
+        None => anyhow::anyhow!(message),
+    }
+}
+
+/// What a failed run is reported as. `claude -p` in text mode prints some
+/// failures (an expired login, for one) on stdout and leaves stderr empty, so
+/// an error built from stderr alone ends at the colon with nothing after it.
+/// Stderr is preferred when it has anything in it; otherwise the end of stdout
+/// is the reason.
+fn failure_message(status: &str, out: &[String], err: &[String]) -> String {
+    let said = |lines: &[String]| -> Option<String> {
+        lines
+            .iter()
+            .any(|line| !line.trim().is_empty())
+            .then(|| lines.join("\n"))
+    };
+    if let Some(stderr) = said(err) {
+        return format!("claude exited with {status}: {stderr}");
+    }
+    let tail = &out[out.len().saturating_sub(STDOUT_TAIL_LINES)..];
+    match said(tail) {
+        Some(stdout) => format!("claude exited with {status}: {stdout}"),
+        None => format!("claude exited with {status} and printed nothing"),
     }
 }
 
@@ -202,6 +284,77 @@ mod tests {
                 (Stream::Stderr, "three".to_string()),
             ],
             "the cap is on what is kept, never on what is watched"
+        );
+    }
+
+    fn lines(text: &str) -> Vec<String> {
+        text.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn stdout_is_the_reason_when_stderr_is_blank() {
+        let message = failure_message(
+            "exit status: 1",
+            &lines("Failed to authenticate: OAuth session expired"),
+            &[],
+        );
+        assert_eq!(
+            message,
+            "claude exited with exit status: 1: Failed to authenticate: OAuth session expired"
+        );
+        let message = failure_message("exit status: 1", &lines("boom"), &lines("  \n"));
+        assert!(message.ends_with(": boom"), "{message}");
+    }
+
+    #[test]
+    fn stderr_is_preferred_when_it_has_anything() {
+        let message = failure_message("exit status: 1", &lines("chatter"), &lines("real reason"));
+        assert_eq!(message, "claude exited with exit status: 1: real reason");
+    }
+
+    #[test]
+    fn the_stdout_tail_is_capped() {
+        let out: Vec<String> = (0..100).map(|n| format!("line {n}")).collect();
+        let message = failure_message("exit status: 1", &out, &[]);
+        assert!(message.contains("line 99"), "{message}");
+        assert!(message.contains("line 80"), "{message}");
+        assert!(!message.contains("line 79"), "{message}");
+    }
+
+    #[test]
+    fn the_incident_is_an_auth_failure_with_the_reason_in_the_message() {
+        // Exactly what the three homelab instances printed: the reason on
+        // stdout, nothing on stderr.
+        let said = "Failed to authenticate: OAuth session expired and could not be refreshed";
+        let err = failure("exit status: 1", &lines(said), &[]);
+        let auth = err.downcast_ref::<AuthFailure>().expect("an auth failure");
+        assert_eq!(auth.said, said);
+        assert_eq!(
+            auth.message,
+            format!("claude exited with exit status: 1: {said}")
+        );
+
+        // And on stderr, in case a release moves it.
+        let err = failure("exit status: 1", &[], &lines(said));
+        assert!(err.downcast_ref::<AuthFailure>().is_some());
+    }
+
+    #[test]
+    fn an_ordinary_failure_is_not_an_auth_failure() {
+        let err = failure("exit status: 1", &lines("error: could not compile"), &[]);
+        assert!(err.downcast_ref::<AuthFailure>().is_none());
+        assert_eq!(
+            err.to_string(),
+            "claude exited with exit status: 1: error: could not compile"
+        );
+    }
+
+    #[test]
+    fn a_run_that_printed_nothing_says_so() {
+        let message = failure_message("exit status: 1", &lines("\n"), &[]);
+        assert_eq!(
+            message,
+            "claude exited with exit status: 1 and printed nothing"
         );
     }
 
