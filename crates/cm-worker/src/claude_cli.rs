@@ -56,6 +56,9 @@ pub trait Claude: Send + Sync {
 /// what the error needs is the end, which is where the reason is.
 const STDERR_LINES_KEPT: usize = 200;
 
+/// How much of stdout goes into the error when stderr had nothing to say.
+const STDOUT_TAIL_LINES: usize = 20;
+
 /// The real thing: `claude -p` on `$PATH`.
 pub struct ClaudeCli;
 
@@ -118,10 +121,13 @@ impl Claude for ClaudeCli {
         // breaks the pipe, and its status and stderr say why far better than
         // "broken pipe" does.
         if !status.success() {
-            anyhow::bail!(
-                "claude exited with {status}: {}",
-                err.unwrap_or_default().join("\n")
-            );
+            // `unwrap_or_default`: a read error on a pipe must not hide the
+            // exit status, which is the one thing known for certain.
+            anyhow::bail!(failure_message(
+                &status.to_string(),
+                &out.unwrap_or_default(),
+                &err.unwrap_or_default(),
+            ));
         }
         // A write that failed against a run that still exited 0 means claude
         // answered a prompt it only half read. The run is not trusted for
@@ -136,6 +142,28 @@ impl Claude for ClaudeCli {
         }
 
         Ok(out?.join("\n"))
+    }
+}
+
+/// What a failed run is reported as. `claude -p` in text mode prints some
+/// failures (an expired login, for one) on stdout and leaves stderr empty, so
+/// an error built from stderr alone ends at the colon with nothing after it.
+/// Stderr is preferred when it has anything in it; otherwise the end of stdout
+/// is the reason.
+fn failure_message(status: &str, out: &[String], err: &[String]) -> String {
+    let said = |lines: &[String]| -> Option<String> {
+        lines
+            .iter()
+            .any(|line| !line.trim().is_empty())
+            .then(|| lines.join("\n"))
+    };
+    if let Some(stderr) = said(err) {
+        return format!("claude exited with {status}: {stderr}");
+    }
+    let tail = &out[out.len().saturating_sub(STDOUT_TAIL_LINES)..];
+    match said(tail) {
+        Some(stdout) => format!("claude exited with {status}: {stdout}"),
+        None => format!("claude exited with {status} and printed nothing"),
     }
 }
 
@@ -202,6 +230,49 @@ mod tests {
                 (Stream::Stderr, "three".to_string()),
             ],
             "the cap is on what is kept, never on what is watched"
+        );
+    }
+
+    fn lines(text: &str) -> Vec<String> {
+        text.lines().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn stdout_is_the_reason_when_stderr_is_blank() {
+        let message = failure_message(
+            "exit status: 1",
+            &lines("Failed to authenticate: OAuth session expired"),
+            &[],
+        );
+        assert_eq!(
+            message,
+            "claude exited with exit status: 1: Failed to authenticate: OAuth session expired"
+        );
+        let message = failure_message("exit status: 1", &lines("boom"), &lines("  \n"));
+        assert!(message.ends_with(": boom"), "{message}");
+    }
+
+    #[test]
+    fn stderr_is_preferred_when_it_has_anything() {
+        let message = failure_message("exit status: 1", &lines("chatter"), &lines("real reason"));
+        assert_eq!(message, "claude exited with exit status: 1: real reason");
+    }
+
+    #[test]
+    fn the_stdout_tail_is_capped() {
+        let out: Vec<String> = (0..100).map(|n| format!("line {n}")).collect();
+        let message = failure_message("exit status: 1", &out, &[]);
+        assert!(message.contains("line 99"), "{message}");
+        assert!(message.contains("line 80"), "{message}");
+        assert!(!message.contains("line 79"), "{message}");
+    }
+
+    #[test]
+    fn a_run_that_printed_nothing_says_so() {
+        let message = failure_message("exit status: 1", &lines("\n"), &[]);
+        assert_eq!(
+            message,
+            "claude exited with exit status: 1 and printed nothing"
         );
     }
 
