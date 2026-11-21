@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use cm_git::GitOps;
 use cm_github::{GithubClient, Issue, IssueComment, PullRequest};
 
+use crate::auth::AuthFailure;
 use crate::claude_cli::{Claude, ClaudeRun, Stream};
 
 /// One issue as the fake serves it: the labels it carries and whether an open
@@ -390,6 +391,10 @@ pub struct FakeClaude {
     fail_for: Vec<String>,
     says: Vec<String>,
     runs: Mutex<Vec<(PathBuf, String)>>,
+    /// Whether the login works. Flipped by [`FakeClaude::log_in`], which is
+    /// what an operator running `claude /login` does.
+    authenticated: Mutex<bool>,
+    probes: Mutex<u64>,
 }
 
 impl Default for FakeClaude {
@@ -399,6 +404,8 @@ impl Default for FakeClaude {
             fail_for: Vec::new(),
             says: Vec::new(),
             runs: Mutex::new(Vec::new()),
+            authenticated: Mutex::new(true),
+            probes: Mutex::new(0),
         }
     }
 }
@@ -416,6 +423,33 @@ impl FakeClaude {
             fail_for: clone_dir_names.iter().map(|d| d.to_string()).collect(),
             ..FakeClaude::default()
         }
+    }
+
+    /// A claude whose login has expired: every run and every probe fails with
+    /// an [`AuthFailure`] until [`FakeClaude::log_in`].
+    pub fn unauthenticated() -> Self {
+        FakeClaude {
+            authenticated: Mutex::new(false),
+            ..FakeClaude::default()
+        }
+    }
+
+    /// The operator logs in again.
+    pub fn log_in(&self) {
+        *self.authenticated.lock().unwrap() = true;
+    }
+
+    /// How many probes the worker ran.
+    pub fn probes(&self) -> u64 {
+        *self.probes.lock().unwrap()
+    }
+
+    fn auth_failure() -> anyhow::Error {
+        anyhow::Error::new(AuthFailure {
+            said: "Failed to authenticate: OAuth session expired and could not be refreshed"
+                .to_string(),
+            message: "claude exited with exit status: 1".to_string(),
+        })
     }
 
     /// A run that writes these lines to stderr before it answers, which is
@@ -442,6 +476,9 @@ impl Claude for FakeClaude {
             .lock()
             .unwrap()
             .push((run.repo_dir.to_path_buf(), run.prompt.to_string()));
+        if !*self.authenticated.lock().unwrap() {
+            return Err(Self::auth_failure());
+        }
         for line in &self.says {
             run.observer.line(Stream::Stderr, line);
         }
@@ -455,5 +492,14 @@ impl Claude for FakeClaude {
         }
         run.observer.line(Stream::Stdout, &self.plan_text);
         Ok(self.plan_text.clone())
+    }
+
+    fn probe(&self, _model: &str) -> anyhow::Result<()> {
+        *self.probes.lock().unwrap() += 1;
+        if *self.authenticated.lock().unwrap() {
+            Ok(())
+        } else {
+            Err(Self::auth_failure())
+        }
     }
 }

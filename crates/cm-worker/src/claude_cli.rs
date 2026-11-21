@@ -49,6 +49,11 @@ pub trait RunObserver: Sync {
 /// fake instead of spending quota (`fakes::FakeClaude`).
 pub trait Claude: Send + Sync {
     fn run(&self, run: ClaudeRun<'_>) -> anyhow::Result<String>;
+
+    /// The cheapest run there is, to find out whether the login works. Fails
+    /// with an [`AuthFailure`] when it does not. Any other failure is not a
+    /// verdict on the login, and callers treat it as one that works.
+    fn probe(&self, model: &str) -> anyhow::Result<()>;
 }
 
 /// How much stderr is kept for the error message on a failed run. A run that
@@ -63,12 +68,48 @@ const STDOUT_TAIL_LINES: usize = 20;
 /// The real thing: `claude -p` on `$PATH`.
 pub struct ClaudeCli;
 
+/// A [`RunObserver`] that listens to nothing, for a run nobody watches.
+struct Unwatched;
+
+impl RunObserver for Unwatched {
+    fn line(&self, _: Stream, _: &str) {}
+}
+
 impl Claude for ClaudeCli {
     fn run(&self, run: ClaudeRun<'_>) -> anyhow::Result<String> {
+        self.spawn(run, &[])
+    }
+
+    fn probe(&self, model: &str) -> anyhow::Result<()> {
+        // Somewhere that is not a clone: the probe has nothing to do with any
+        // repo, and `claude` writes session state into the directory it runs
+        // in.
+        let dir = std::env::temp_dir();
+        self.spawn(
+            ClaudeRun {
+                repo_dir: &dir,
+                model,
+                effort: "low",
+                prompt: "say ok",
+                observer: &Unwatched,
+            },
+            // A spent usage window must not park the probe for hours: a probe
+            // that fails for any reason but the login is good enough.
+            &["CLAUDE_CODE_RETRY_WATCHDOG"],
+        )
+        .map(drop)
+    }
+}
+
+impl ClaudeCli {
+    /// Runs `claude -p` with the variables in `unset` removed from its
+    /// environment, on top of the ones that are always removed.
+    fn spawn(&self, run: ClaudeRun<'_>, unset: &[&str]) -> anyhow::Result<String> {
         // The prompt goes in on stdin, not as an argument: it carries the
         // issue body and the plan, and Linux caps a single argv entry at
         // 128KiB, and a long pasted log in an issue would be `E2BIG` forever.
-        let mut child = Command::new("claude")
+        let mut command = Command::new("claude");
+        command
             .arg("-p")
             .arg("--model")
             .arg(run.model)
@@ -85,8 +126,11 @@ impl Claude for ClaudeCli {
             .current_dir(run.repo_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        for var in unset {
+            command.env_remove(var);
+        }
+        let mut child = command.spawn()?;
 
         // Three threads, one per pipe: `claude` can fill a pipe buffer on
         // either output stream before it has read the whole prompt, so a
