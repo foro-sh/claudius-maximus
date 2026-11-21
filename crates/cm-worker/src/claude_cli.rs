@@ -9,6 +9,7 @@
 //! about. So both pipes are drained line by line and every line is handed to a
 //! [`RunObserver`] as it arrives.
 
+use crate::auth::{self, AuthFailure};
 use anyhow::Context;
 use std::collections::VecDeque;
 use std::io::{BufReader, Read, Write};
@@ -123,11 +124,15 @@ impl Claude for ClaudeCli {
         if !status.success() {
             // `unwrap_or_default`: a read error on a pipe must not hide the
             // exit status, which is the one thing known for certain.
-            anyhow::bail!(failure_message(
-                &status.to_string(),
-                &out.unwrap_or_default(),
-                &err.unwrap_or_default(),
-            ));
+            let out = out.unwrap_or_default();
+            let err = err.unwrap_or_default();
+            let message = failure_message(&status.to_string(), &out, &err);
+            // A dead login is not this run's fault, so it gets its own error
+            // type for the worker to tell apart. Only on a failed exit.
+            if let Some(said) = auth::classify(&out).or_else(|| auth::classify(&err)) {
+                return Err(anyhow::Error::new(AuthFailure { said, message }));
+            }
+            anyhow::bail!(message);
         }
         // A write that failed against a run that still exited 0 means claude
         // answered a prompt it only half read. The run is not trusted for
