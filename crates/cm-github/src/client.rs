@@ -20,6 +20,13 @@ const GITHUB_WEB: &str = "https://github.com";
 /// and comments, and push over HTTPS with the same token.
 const SCOPES: [&str; 1] = ["repo"];
 
+/// How long a GitHub connection may take to open, and how long a read or
+/// write may sit idle. Without it a stalled connection blocks a request
+/// forever, and with it the sweep (foro-sh/claudius-maximus#28). The read and
+/// write limits apply to each operation rather than to a whole response, so a
+/// slow but moving listing still completes.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct OctocrabGithubClient {
     crab: Octocrab,
     token: String,
@@ -48,6 +55,7 @@ impl OctocrabGithubClient {
             &FileStore::in_home()?,
             GITHUB_API,
             GITHUB_WEB,
+            NETWORK_TIMEOUT,
         )
         .await
     }
@@ -58,9 +66,10 @@ impl OctocrabGithubClient {
         store: &dyn TokenStore,
         api_uri: &str,
         web_uri: &str,
+        timeout: Duration,
     ) -> anyhow::Result<Self> {
         if let Some(token) = store.load()? {
-            return Self::authenticated(api_uri, token).await?.with_context(|| {
+            return Self::authenticated(api_uri, token, timeout).await?.with_context(|| {
                 format!(
                     "GitHub rejected the token stored for {instance_name:?}: revoked, expired, \
                      or issued against another OAuth app. Delete {} and restart to authorize \
@@ -70,9 +79,9 @@ impl OctocrabGithubClient {
             });
         }
 
-        let token = device_flow(client_id, web_uri).await?;
+        let token = device_flow(client_id, web_uri, timeout).await?;
         store.store(&token)?;
-        Self::authenticated(api_uri, token)
+        Self::authenticated(api_uri, token, timeout)
             .await?
             .context("GitHub rejected the token it just issued")
     }
@@ -81,10 +90,17 @@ impl OctocrabGithubClient {
     /// `Ok(None)` is specifically a 401: the token is no good. Every other
     /// failure stays an `Err`, so a flaky API never gets reported as a
     /// rejected token.
-    async fn authenticated(api_uri: &str, token: String) -> anyhow::Result<Option<Self>> {
+    async fn authenticated(
+        api_uri: &str,
+        token: String,
+        timeout: Duration,
+    ) -> anyhow::Result<Option<Self>> {
         let crab = Octocrab::builder()
             .base_uri(api_uri)
             .context("invalid GitHub API base URI")?
+            .set_connect_timeout(Some(timeout))
+            .set_read_timeout(Some(timeout))
+            .set_write_timeout(Some(timeout))
             .user_access_token(token.clone())
             .build()
             .context("building the GitHub client")?;
@@ -393,13 +409,16 @@ impl GithubClient for OctocrabGithubClient {
 }
 
 /// Run GitHub's OAuth device flow to completion and return the access token.
-async fn device_flow(client_id: &str, web_uri: &str) -> anyhow::Result<String> {
+async fn device_flow(client_id: &str, web_uri: &str, timeout: Duration) -> anyhow::Result<String> {
     let client_id = SecretString::from(client_id.to_owned());
 
     // Device flow is served by the website, and only speaks JSON if asked.
     let login = Octocrab::builder()
         .base_uri(web_uri)
         .context("invalid GitHub base URI")?
+        .set_connect_timeout(Some(timeout))
+        .set_read_timeout(Some(timeout))
+        .set_write_timeout(Some(timeout))
         .add_header(ACCEPT, "application/json".to_owned())
         .build()
         .context("building the device-flow client")?;
@@ -513,6 +532,15 @@ mod tests {
 
     /// A client already holding `stored-token`, pointed at the mock server.
     async fn client(server: &MockServer) -> OctocrabGithubClient {
+        client_with_timeout(server, NETWORK_TIMEOUT).await
+    }
+
+    /// Like [`client`], with the network timeout turned down so a test can
+    /// outwait it.
+    async fn client_with_timeout(
+        server: &MockServer,
+        timeout: Duration,
+    ) -> OctocrabGithubClient {
         mock_valid_user(server).await;
         let store = MemoryStore::with_token("stored-token");
         OctocrabGithubClient::login_or_load_with(
@@ -521,6 +549,7 @@ mod tests {
             &store,
             &server.uri(),
             &server.uri(),
+            timeout,
         )
         .await
         .unwrap()
@@ -584,6 +613,7 @@ mod tests {
             &store,
             &server.uri(),
             &server.uri(),
+            NETWORK_TIMEOUT,
         )
         .await
         .unwrap();
@@ -614,6 +644,7 @@ mod tests {
             &store,
             &server.uri(),
             &server.uri(),
+            NETWORK_TIMEOUT,
         )
         .await
         .map(|_| ())
@@ -661,6 +692,7 @@ mod tests {
             &store,
             &server.uri(),
             &server.uri(),
+            NETWORK_TIMEOUT,
         )
         .await
         .map(|_| ())
@@ -691,6 +723,7 @@ mod tests {
             &store,
             &server.uri(),
             &server.uri(),
+            NETWORK_TIMEOUT,
         )
         .await
         .map(|_| ())
@@ -699,6 +732,69 @@ mod tests {
         assert!(
             error.to_string().contains("checking the stored token"),
             "unexpected error: {error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_token_check_times_out_instead_of_reading_as_a_rejected_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(author("claudius"))
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+
+        let store = MemoryStore::with_token("stored-token");
+        let started = std::time::Instant::now();
+        let error = OctocrabGithubClient::login_or_load_with(
+            INSTANCE,
+            CLIENT_ID,
+            &store,
+            &server.uri(),
+            &server.uri(),
+            Duration::from_millis(200),
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("checking the stored token"),
+            "a slow network is not a rejected token: {error:#}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "gave up only once the server answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_listing_times_out() {
+        let server = MockServer::start().await;
+        let client = client_with_timeout(&server, Duration::from_millis(200)).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/foro-sh/foro/issues"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([issue_json(12, "danielsteman", false)]))
+                    .set_delay(Duration::from_secs(2)),
+            )
+            .mount(&server)
+            .await;
+
+        let started = std::time::Instant::now();
+        let result = client
+            .list_labeled_issues("foro-sh/foro", "claudius-maximus")
+            .await;
+
+        assert!(result.is_err(), "expected a timeout, got {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "gave up only once the server answered"
         );
     }
 
