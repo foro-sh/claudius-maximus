@@ -25,13 +25,28 @@ use status::{Activity, Stage, Status};
 use systemd::Systemd;
 use worker::Worker;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// How long libgit2 may take to open a connection, and how long each socket
+/// read or write may sit idle (foro-sh/claudius-maximus#28).
+const GIT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const GIT_IO_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// A plain `main` rather than `#[tokio::main]`: libgit2's timeouts are process
+/// globals that may only be set while this is the only thread, and the macro
+/// would already have started the runtime's threads by the time its body ran.
+fn main() -> anyhow::Result<()> {
     // First, and before any thread exists: reading this takes systemd's
     // variables back out of the environment, which is only sound while this is
     // the only thread running.
     let systemd = Arc::new(Systemd::from_env());
+    cm_git::set_network_timeouts(GIT_CONNECT_TIMEOUT, GIT_IO_TIMEOUT)?;
 
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(systemd))
+}
+
+async fn run(systemd: Arc<Systemd>) -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let status = Arc::new(Status::new(&config));
     let notifier = Arc::new(Notifier::new(

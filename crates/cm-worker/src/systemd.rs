@@ -33,10 +33,9 @@ pub struct Systemd {
 impl Systemd {
     /// Reads `NOTIFY_SOCKET` and `WATCHDOG_USEC`.
     ///
-    /// The variables are left in the environment rather than removed: under
-    /// `#[tokio::main]` the runtime's threads already exist by the time any of
-    /// this runs, and removing an environment variable with other threads
-    /// alive is unsound. The `claude` child is kept away from the notify
+    /// The variables are left in the environment rather than removed: removing
+    /// an environment variable is only sound while no other thread is alive,
+    /// and callers should not have to be the first thing to run to use this. The `claude` child is kept away from the notify
     /// socket where the child is spawned instead (see `claude_cli`), which is
     /// the only place that inherits it.
     pub fn from_env() -> Self {
