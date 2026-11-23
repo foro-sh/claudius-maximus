@@ -9,14 +9,17 @@
 //! task would be queued behind exactly the thing it is supposed to be
 //! reporting on.
 //!
-//! It is only ever a reader. Nothing here can change what the worker does,
-//! which is what makes it safe for it to run at any moment.
+//! It is only a reader of the worker, with one exception: it answers systemd's
+//! watchdog, and stops answering when the worker has stopped moving (see
+//! [`Heartbeat::answer_watchdog`]). Nothing else here changes what the worker
+//! does, which is what makes it safe for it to run at any moment.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::httpd;
 use crate::notify::Notifier;
-use crate::status::{Level, Snapshot, Status, human};
+use crate::status::{Level, Snapshot, Stage, Status, human};
 use crate::systemd::Systemd;
 use crate::worker::stall_key;
 
@@ -48,6 +51,10 @@ pub struct Heartbeat {
 struct Beat {
     last_logged: Option<(String, Instant)>,
     stalled: Option<String>,
+    /// What the worker was doing when the watchdog ping was first withheld,
+    /// so that a wedge is said once rather than on every tick until systemd
+    /// acts on it.
+    wedged: Option<String>,
 }
 
 impl Heartbeat {
@@ -84,7 +91,7 @@ impl Heartbeat {
     /// one so that every rule below is testable without a clock.
     fn tick(&self, snapshot: &Snapshot, beat: &mut Beat) {
         self.systemd.status(&snapshot.line());
-        self.systemd.ping();
+        self.answer_watchdog(snapshot, beat);
 
         // Silence is the point. A resting worker between sweeps is not news
         // once a minute; a run in flight, or a window being waited out, is
@@ -100,6 +107,64 @@ impl Heartbeat {
         // per-minute line off has not asked to stop hearing about a run that
         // has written nothing for half an hour. `STALL_AFTER=0` is that ask.
         self.check_for_silence(snapshot, beat);
+    }
+
+    /// Pings systemd's watchdog, unless the worker has stopped moving.
+    ///
+    /// The ping comes from this thread, which keeps beating whatever the sweep
+    /// task is doing, so on its own it only proves that the process exists. A
+    /// sweep blocked on a dead connection once sat for 28 hours under a unit
+    /// systemd called healthy (foro-sh/claudius-maximus#28). So the ping is
+    /// held back under the rule `/healthz` uses ([`httpd::healthy`]): a
+    /// `claude` run counts as alive for as long as it likes, and anything else
+    /// has to have moved on within [`httpd::grace_for`]. Then systemd kills
+    /// the unit once `WatchdogSec` runs out and `Restart=always` brings it
+    /// back, and `KillMode=control-group` takes the stray children with it.
+    ///
+    /// `Rising` and `Authorizing` are exempt: the device flow waits up to a
+    /// quarter of an hour on a human, and that is not a wedge.
+    fn answer_watchdog(&self, snapshot: &Snapshot, beat: &mut Beat) {
+        let waiting_on_somebody = matches!(
+            snapshot.activity.stage,
+            Stage::Rising | Stage::Authorizing
+        );
+        let moving = waiting_on_somebody
+            || httpd::healthy(snapshot, httpd::grace_for(snapshot.poll_interval));
+        if moving {
+            beat.wedged = None;
+            self.systemd.ping();
+            return;
+        }
+
+        // Nothing is listening for pings when nothing is supervising, and
+        // promising a restart nobody will carry out would be a lie.
+        if self.systemd.watchdog_interval().is_none() {
+            return;
+        }
+        let doing = snapshot.doing();
+        if beat.wedged.as_deref() == Some(doing.as_str()) {
+            return;
+        }
+        beat.wedged = Some(doing.clone());
+
+        let stuck = human(snapshot.activity_for);
+        println!(
+            "{}: nothing has moved in {stuck} on {doing}; withholding the watchdog ping so \
+             systemd restarts it",
+            self.instance
+        );
+        self.status.note(
+            Level::Bad,
+            format!("nothing has moved in {stuck} on {doing}; restarting"),
+        );
+        self.notifier.post_once(
+            &wedged_key(&doing),
+            &format!(
+                ":skull: {} has made no progress in {stuck} on `{doing}`; letting systemd \
+                 restart it.",
+                self.instance
+            ),
+        );
     }
 
     fn log_if_due(&self, snapshot: &Snapshot, beat: &mut Beat) {
@@ -159,11 +224,16 @@ impl Heartbeat {
     }
 }
 
+fn wedged_key(doing: &str) -> String {
+    format!("wedged {doing}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::status::{Activity, Stage};
+    use crate::status::Activity;
+    use crate::systemd::test_support::{Listener, talking_to};
 
     fn heartbeat(status: Arc<Status>) -> Heartbeat {
         Heartbeat {
@@ -296,5 +366,112 @@ mod tests {
 
         heartbeat.tick(&status.snapshot(), &mut beat);
         assert_eq!(beat.stalled, None);
+    }
+
+    /// A heartbeat on a watched unit, and what systemd has heard from it.
+    fn watched(status: Arc<Status>, name: &str) -> (Heartbeat, Listener) {
+        let listener = Listener::new(name);
+        let mut heartbeat = heartbeat(status);
+        heartbeat.systemd = Arc::new(talking_to(&listener, Some(Duration::from_secs(180))));
+        (heartbeat, listener)
+    }
+
+    /// The snapshot with the current activity having lasted `for_`.
+    fn lasting(status: &Status, for_: Duration) -> Snapshot {
+        let mut snapshot = status.snapshot();
+        snapshot.activity_for = for_;
+        snapshot
+    }
+
+    fn pinged(listener: &Listener) -> bool {
+        listener.pending().iter().any(|line| line == "WATCHDOG=1")
+    }
+
+    #[test]
+    fn a_sweep_that_stopped_moving_is_not_answered_for() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        status.doing(Activity::on(Stage::Sweeping, "foro-sh/platform#1880"));
+        let (heartbeat, listener) = watched(status.clone(), "wedged");
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(60)), &mut beat);
+        assert!(pinged(&listener), "a sweep that just started is fine");
+        assert_eq!(beat.wedged, None);
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(3 * 3600)), &mut beat);
+        assert!(!pinged(&listener), "three hours on one issue is a hang");
+        assert_eq!(
+            beat.wedged.as_deref(),
+            Some("sweeping foro-sh/platform#1880")
+        );
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(4 * 3600)), &mut beat);
+        assert!(!pinged(&listener), "and stays one");
+    }
+
+    #[test]
+    fn a_wedge_that_clears_is_answered_for_again() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        status.doing(Activity::on(Stage::Sweeping, "foro-sh/platform#1880"));
+        let (heartbeat, listener) = watched(status.clone(), "recovers");
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(3600)), &mut beat);
+        assert!(!pinged(&listener));
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(1)), &mut beat);
+        assert!(pinged(&listener));
+        assert_eq!(beat.wedged, None);
+    }
+
+    #[test]
+    fn a_claude_run_may_take_hours() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        status.doing(Activity::run(
+            Stage::Implementing,
+            "foro-sh/foro#7",
+            "claude-sonnet-5",
+        ));
+        let (heartbeat, listener) = watched(status.clone(), "implementing");
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(5 * 3600)), &mut beat);
+        assert!(pinged(&listener));
+        assert_eq!(beat.wedged, None);
+    }
+
+    #[test]
+    fn the_device_flow_may_wait_on_a_human() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        status.doing(Activity::bare(Stage::Authorizing));
+        let (heartbeat, listener) = watched(status.clone(), "authorizing");
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(20 * 60)), &mut beat);
+        assert!(pinged(&listener));
+        assert_eq!(beat.wedged, None);
+    }
+
+    #[test]
+    fn a_worker_resting_between_sweeps_is_answered_for() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        status.doing(Activity::bare(Stage::Resting));
+        let (heartbeat, listener) = watched(status.clone(), "resting");
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(5 * 60)), &mut beat);
+        assert!(pinged(&listener));
+        assert_eq!(beat.wedged, None);
+    }
+
+    #[test]
+    fn an_unsupervised_worker_has_nobody_to_restart_it() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        status.doing(Activity::on(Stage::Sweeping, "foro-sh/platform#1880"));
+        let heartbeat = heartbeat(status.clone());
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(3600)), &mut beat);
+        assert_eq!(beat.wedged, None, "no watchdog, so nothing to withhold");
     }
 }
