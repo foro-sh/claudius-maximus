@@ -255,10 +255,14 @@ $ systemctl status claudius@claudius-maximus
 
 `WatchdogSec=180` goes with it. The heartbeat thread answers the watchdog
 independently of the sweep loop — a long run and a spent window are allowed to
-block for hours and must never be restarted for it. What the watchdog catches is
-a process that is still there with nobody home. `HEARTBEAT_INTERVAL=0` silences
-the per-minute journal line without silencing the pings; the one-off line about
-a run gone quiet carries on until `STALL_AFTER=0` turns that off too.
+block for hours and must never be restarted for it. It stops answering when the
+worker has no run in flight and has moved on to nothing in ten poll intervals
+(never less than ten minutes, the `/healthz` rule), so a sweep wedged on a dead
+connection is killed and restarted by systemd instead of sitting there; the
+device flow, which waits on a human, is exempt. The heartbeat says so in the
+journal and on Mattermost first. `HEARTBEAT_INTERVAL=0` silences the per-minute
+journal line without silencing the pings; the one-off line about a run gone
+quiet carries on until `STALL_AFTER=0` turns that off too.
 
 ### The status page
 
@@ -297,13 +301,13 @@ since a run waiting out a window is still a run — so time actually spent worki
 is the difference between the two, and the ratio of window to difference is how
 much a second instance would buy you.
 
-`/healthz` is deliberately not a progress check. A nine-hour implement run is
-healthy, and so is the five-hour window it may be waiting out inside. What
-returns `503` is a worker with no run in flight that hasn't moved on to anything
-in ten poll intervals (never less than ten minutes) — the one failure neither
-the watchdog nor `ps` can see. It asks what the worker moved to last rather than
-when a sweep last *finished*, because the sweep that would prove the loop is
-turning is the one still running. The grace therefore assumes every step between
+`/healthz` is deliberately not a progress check of a run. A nine-hour implement
+run is healthy, and so is the five-hour window it may be waiting out inside.
+What returns `503` is a worker with no run in flight that hasn't moved on to
+anything in ten poll intervals (never less than ten minutes) — the failure `ps`
+cannot see, and the same rule the watchdog restarts on. It asks what the worker
+moved to last rather than when a sweep last *finished*, because the sweep that
+would prove the loop is turning is the one still running. The grace therefore assumes every step between
 runs is shorter than it; the first clone of a very large repo is the one that may
 not be, so raise `POLL_INTERVAL` on such a box or expect a `503` while it lands.
 
@@ -458,8 +462,10 @@ warnings`, `cargo build --workspace` and `cargo test --workspace` on every PR.
 - **Mattermost messages are controlled text** (no issue titles), so nothing
   richer than a fixed line per transition is posted.
 - **Usage-window detection is a best guess, and only ever a report.**
-- **The systemd watchdog proves liveness, not progress.** `/healthz` is what
-  notices a worker that has stopped moving.
+- **The watchdog's grace is the `/healthz` grace.** A step between runs that
+  legitimately takes longer than ten minutes (the first clone of a very large
+  repo) is restarted like a hang. libgit2 and GitHub requests carry their own
+  timeouts, so only a real stall gets that far.
 - **The status page is a window onto a running process, not a history.** The
   register lives in memory, like the backoff counters and for the same reason:
   GitHub holds the state that matters. Scrape `/metrics` to keep history.

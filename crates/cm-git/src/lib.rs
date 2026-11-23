@@ -2,6 +2,7 @@
 //! Kept as a trait so the worker's state machine can also be tested against a
 //! fake (foro-sh/claudius-maximus#1).
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use git2::build::{CheckoutBuilder, RepoBuilder};
@@ -51,6 +52,32 @@ pub trait GitOps: Send + Sync {
     /// (the same OAuth token `cm-github`'s client holds). A ref origin
     /// refuses is an error, not a push that quietly did nothing.
     fn push(&self, clone_path: &Path, branch: &str, token: &str) -> anyhow::Result<()>;
+}
+
+/// Bound libgit2's network operations: `connect` for opening a connection,
+/// `io` for each socket read or write after that. Without these a stalled
+/// server blocks a fetch or push forever (foro-sh/claudius-maximus#28).
+///
+/// `io` limits each read or write, not a whole transfer, so a long clone that
+/// keeps making progress is not cut off.
+///
+/// These are libgit2 process globals, written without synchronization, so call
+/// this before any other thread exists: before building the async runtime, not
+/// inside it.
+pub fn set_network_timeouts(connect: Duration, io: Duration) -> Result<()> {
+    let millis = |timeout: Duration| {
+        i32::try_from(timeout.as_millis())
+            .with_context(|| format!("network timeout {timeout:?} does not fit libgit2's int"))
+    };
+    let (connect, io) = (millis(connect)?, millis(io)?);
+    // SAFETY: the caller promises no other thread is running (see above).
+    unsafe {
+        git2::opts::set_server_connect_timeout_in_milliseconds(connect)
+            .context("setting libgit2's connect timeout")?;
+        git2::opts::set_server_timeout_in_milliseconds(io)
+            .context("setting libgit2's I/O timeout")?;
+    }
+    Ok(())
 }
 
 /// `GitOps` on top of vendored libgit2.

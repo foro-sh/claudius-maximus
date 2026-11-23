@@ -38,14 +38,17 @@ Environment=CLAUDE_CODE_RETRY_WATCHDOG=1
 # "Daniel Steman" loses its second word.
 EnvironmentFile=/etc/%i.env
 ExecStart=/home/%i/claudius-maximus/claudius-maximus
-# The heartbeat thread pings this at half the interval below. It proves the
-# process is alive and its threads are still scheduled, which is all a watchdog
-# can prove: a claude run legitimately blocks for hours, and a spent usage
-# window legitimately blocks for five, so neither of those may be a restart.
-# What it catches is the worker that is still there with nobody home. Set
-# HEARTBEAT_INTERVAL=0 in the env file to silence the per-minute journal line;
-# the pings, and the one-off line about a run that has gone quiet, carry on
-# regardless (STALL_AFTER=0 silences that one).
+# The heartbeat thread pings this at half the interval below, and holds the
+# ping back when the worker has stopped moving: no claude run in flight and
+# nothing changed for ten minutes (the /healthz rule). A claude run
+# legitimately blocks for hours, and a spent usage window for five, so a run in
+# flight always counts as alive; the device flow waits on a human and is exempt
+# too. What it catches is a sweep wedged on a dead connection, which once sat
+# for 28 hours with the unit still `active (running)`. systemd then kills the
+# unit (SIGABRT, so `coredumpctl debug` has the stack) and Restart=always
+# brings it back. Set HEARTBEAT_INTERVAL=0 in the env file to silence the
+# per-minute journal line; the pings, and the one-off line about a run that has
+# gone quiet, carry on regardless (STALL_AFTER=0 silences that one).
 WatchdogSec=180
 Restart=always
 RestartSec=30

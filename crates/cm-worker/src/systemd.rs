@@ -9,10 +9,14 @@
 //! carries the same line the journal heartbeat writes.
 //!
 //! The watchdog is the other half: systemd kills and restarts a worker whose
-//! pings stop. That is a liveness check on the *process*, not on the backlog -
-//! the pings come from the heartbeat thread, which keeps beating while a run
-//! blocks for hours, because that run is allowed to. What it catches is the
-//! process that is still there but no longer anybody home.
+//! pings stop. The pings come from the heartbeat thread, which keeps beating
+//! whatever the sweep is doing, so the heartbeat holds them back when the
+//! worker has stopped moving: no `claude` run in flight, and nothing changed
+//! for longer than `/healthz`'s grace (see `heartbeat::Heartbeat`). A run
+//! itself may block for hours, because it is allowed to, and counts as alive.
+//! What this catches is a sweep wedged on a dead connection, which once sat
+//! for 28 hours under a unit that still read `active (running)`
+//! (foro-sh/claudius-maximus#28).
 //!
 //! No `libsystemd`: the protocol is newline-separated `KEY=value` in a
 //! datagram, and a dependency for that would be sillier than the thirty lines
@@ -33,12 +37,12 @@ pub struct Systemd {
 impl Systemd {
     /// Reads `NOTIFY_SOCKET` and `WATCHDOG_USEC`.
     ///
-    /// The variables are left in the environment rather than removed: under
-    /// `#[tokio::main]` the runtime's threads already exist by the time any of
-    /// this runs, and removing an environment variable with other threads
-    /// alive is unsound. The `claude` child is kept away from the notify
-    /// socket where the child is spawned instead (see `claude_cli`), which is
-    /// the only place that inherits it.
+    /// The variables are left in the environment rather than removed: removing
+    /// an environment variable is only sound while no other thread is alive,
+    /// and callers should not have to be the first thing to run to use this.
+    /// The `claude` child is kept away from the notify socket where the child
+    /// is spawned instead (see `claude_cli`), which is the only place that
+    /// inherits it.
     pub fn from_env() -> Self {
         let socket = std::env::var("NOTIFY_SOCKET")
             .ok()
@@ -163,18 +167,19 @@ fn connect(path: &str) -> Option<UnixDatagram> {
     }
 }
 
+/// A notify socket of our own, for tests here and in the heartbeat's.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
 
     /// A notify socket of our own, in the same place systemd would put one.
-    struct Listener {
+    pub(crate) struct Listener {
         socket: UnixDatagram,
         path: std::path::PathBuf,
     }
 
     impl Listener {
-        fn new(name: &str) -> Self {
+        pub(crate) fn new(name: &str) -> Self {
             let path =
                 std::env::temp_dir().join(format!("cm-notify-{}-{name}", std::process::id()));
             let _ = std::fs::remove_file(&path);
@@ -184,10 +189,23 @@ mod tests {
             }
         }
 
-        fn heard(&self) -> String {
+        pub(crate) fn heard(&self) -> String {
             let mut buf = [0u8; 256];
             let read = self.socket.recv(&mut buf).unwrap();
             String::from_utf8_lossy(&buf[..read]).into_owned()
+        }
+
+        /// Everything sent so far and not yet heard, without waiting for
+        /// more: what a test reads to check that something was *not* sent.
+        pub(crate) fn pending(&self) -> Vec<String> {
+            self.socket.set_nonblocking(true).unwrap();
+            let mut lines = Vec::new();
+            let mut buf = [0u8; 256];
+            while let Ok(read) = self.socket.recv(&mut buf) {
+                lines.push(String::from_utf8_lossy(&buf[..read]).into_owned());
+            }
+            self.socket.set_nonblocking(false).unwrap();
+            lines
         }
     }
 
@@ -197,13 +215,19 @@ mod tests {
         }
     }
 
-    fn talking_to(listener: &Listener, watchdog: Option<Duration>) -> Systemd {
+    pub(crate) fn talking_to(listener: &Listener, watchdog: Option<Duration>) -> Systemd {
         Systemd {
             socket: connect(&listener.path.to_string_lossy()),
             watchdog,
             complained: AtomicBool::new(false),
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{Listener, talking_to};
+    use super::*;
 
     #[test]
     fn systemd_hears_ready_and_the_status_line() {
