@@ -39,9 +39,10 @@ impl Systemd {
     ///
     /// The variables are left in the environment rather than removed: removing
     /// an environment variable is only sound while no other thread is alive,
-    /// and callers should not have to be the first thing to run to use this. The `claude` child is kept away from the notify
-    /// socket where the child is spawned instead (see `claude_cli`), which is
-    /// the only place that inherits it.
+    /// and callers should not have to be the first thing to run to use this.
+    /// The `claude` child is kept away from the notify socket where the child
+    /// is spawned instead (see `claude_cli`), which is the only place that
+    /// inherits it.
     pub fn from_env() -> Self {
         let socket = std::env::var("NOTIFY_SOCKET")
             .ok()
