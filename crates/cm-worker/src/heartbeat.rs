@@ -121,13 +121,11 @@ impl Heartbeat {
     /// the unit once `WatchdogSec` runs out and `Restart=always` brings it
     /// back, and `KillMode=control-group` takes the stray children with it.
     ///
-    /// `Rising` and `Authorizing` are exempt: the device flow waits up to a
-    /// quarter of an hour on a human, and that is not a wedge.
+    /// `Authorizing` is exempt: the device flow waits up to a quarter of an
+    /// hour on a human, and that is not a wedge. `Rising` is not: nothing in
+    /// it waits on anybody.
     fn answer_watchdog(&self, snapshot: &Snapshot, beat: &mut Beat) {
-        let waiting_on_somebody = matches!(
-            snapshot.activity.stage,
-            Stage::Rising | Stage::Authorizing
-        );
+        let waiting_on_somebody = snapshot.activity.stage == Stage::Authorizing;
         let moving = waiting_on_somebody
             || httpd::healthy(snapshot, httpd::grace_for(snapshot.poll_interval));
         if moving {
@@ -450,6 +448,17 @@ mod tests {
         heartbeat.tick(&lasting(&status, Duration::from_secs(20 * 60)), &mut beat);
         assert!(pinged(&listener));
         assert_eq!(beat.wedged, None);
+    }
+
+    #[test]
+    fn a_worker_stuck_rising_is_not_answered_for() {
+        let status = Arc::new(Status::new(&Config::sample()));
+        let (heartbeat, listener) = watched(status.clone(), "rising");
+        let mut beat = Beat::default();
+
+        heartbeat.tick(&lasting(&status, Duration::from_secs(3600)), &mut beat);
+        assert!(!pinged(&listener), "nothing in rising waits on a human");
+        assert_eq!(beat.wedged.as_deref(), Some("rising"));
     }
 
     #[test]
